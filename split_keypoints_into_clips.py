@@ -96,7 +96,24 @@ def determine_clip_label(start_frame, end_frame, seizure_range, fps=30.0):
 def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip=100):
     """Process all keypoint files, split into clips, and save with labels."""
     
-    # Create output directory if it doesn't exist
+    # Clean .pkl files from output directory
+    if os.path.exists(output_dir):
+        print(f"Cleaning .pkl files from output directory: {output_dir}")
+        for file in os.listdir(output_dir):
+            if file.endswith('.pkl'):
+                file_path = os.path.join(output_dir, file)
+                try:
+                    os.unlink(file_path)
+                except Exception as e:
+                    print(f"Error deleting {file_path}: {e}")
+        
+        # Wait for user confirmation
+        response = input("\nDirectory cleaned. Press Enter to continue or 'q' to quit: ")
+        if response.lower() == 'q':
+            print("Operation cancelled by user")
+            sys.exit(0)
+    
+    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
     # Read video annotations
@@ -265,7 +282,7 @@ if __name__ == '__main__':
         'keypoints_dir': 'preprocessing/video_keypoints',
         'output_dir': 'preprocessing/clip_keypoints',
         'annotation_file': 'preprocessing/video_annotations/video_annotations.txt',
-        'frames_per_clip': 100  # Same as in clip_and_annotate.ipynb
+        'frames_per_clip': 90  # Same as in clip_and_annotate.ipynb
     }
     
     # Run processing

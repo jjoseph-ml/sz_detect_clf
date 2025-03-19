@@ -9,6 +9,7 @@ import traceback
 import warnings
 import logging
 import sys
+import shutil
 
 # Suppress specific warnings
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -93,7 +94,25 @@ def determine_clip_label(start_frame, end_frame, seizure_range, fps=30.0):
     
     return 1 if is_seizure else 0
 
-def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip=100, stride=None, clip_annotations_file=None):
+def cleanup_output_directory(output_dir):
+    """
+    Clean up the output directory by removing all existing files.
+    
+    Args:
+        output_dir: Directory to clean up
+    """
+    if os.path.exists(output_dir):
+        print(f"Cleaning up existing files in {output_dir}...")
+        # Option 1: Remove and recreate the directory
+        shutil.rmtree(output_dir)
+        os.makedirs(output_dir)
+        print(f"Cleaned up {output_dir}")
+    else:
+        # Create the directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Created new directory {output_dir}")
+
+def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip, stride=None, clip_annotations_file=None):
     """
     Process all keypoint files, split into clips using a rolling window approach, and save with labels.
     
@@ -115,8 +134,14 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
     if clip_annotations_file is None:
         clip_annotations_file = os.path.join('preprocessing', 'video_annotations', 'clip_annotations.txt')
     
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    # Clean up the output directory before processing
+    cleanup_output_directory(output_dir)
+    
+    # Pause execution and wait for user input
+    user_input = input("\nDirectory cleanup complete. Press Enter to continue or type 'exit' to abort: ")
+    if user_input.lower() == 'exit':
+        print("Operation aborted by user.")
+        return
     
     # Read video annotations
     print("Reading video annotations...")
@@ -286,12 +311,20 @@ if __name__ == '__main__':
         'keypoints_dir': 'preprocessing/video_keypoints',
         'output_dir': 'preprocessing/clip_keypoints',
         'annotation_file': 'preprocessing/video_annotations/video_annotations.txt',
-        'frames_per_clip': 100,  # Same as in clip_and_annotate.ipynb
+        'frames_per_clip': 90,  # Same as in clip_and_annotate.ipynb
         'clip_annotations_file': 'preprocessing/video_annotations/clip_annotations.txt'  # Path to save clip annotations
     }
     
     # Set stride to half of frames_per_clip
     stride = config['frames_per_clip'] // 2
+    
+    print("Starting keypoints processing with the following configuration:")
+    print(f"- Keypoints directory: {config['keypoints_dir']}")
+    print(f"- Output directory: {config['output_dir']}")
+    print(f"- Annotation file: {config['annotation_file']}")
+    print(f"- Frames per clip: {config['frames_per_clip']}")
+    print(f"- Stride: {stride}")
+    print(f"- Clip annotations file: {config['clip_annotations_file']}")
     
     # Run processing
     process_all_keypoints(
@@ -302,3 +335,5 @@ if __name__ == '__main__':
         stride,
         config['clip_annotations_file']
     )
+    
+    print("\nProcessing complete. Check the output directory for generated clips.")
