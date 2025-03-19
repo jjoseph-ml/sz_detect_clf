@@ -180,7 +180,7 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
     Returns:
         List of annotation file paths and total number of patients
     """
-    np.random.seed(42)  # For reproducibility
+    np.random.seed(99)  # For reproducibility
     
     # Load and organize files by patient
     patient_data = organize_by_patient(input_folder)
@@ -215,9 +215,6 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
         raise ValueError(f"Not enough patients ({total_patients}) for test ({patients_per_test}) "
                        f"and validation ({patients_per_val}) sets")
     
-    # Create k different splits of the data
-    fold_size = total_patients // k
-    
     # Load all annotations once
     all_annotations = load_all_annotations(input_folder)
     
@@ -229,25 +226,45 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
     
     # Create k fold configurations
     for fold in range(k):
-        # Calculate indices for this fold
-        start_idx = fold * fold_size
-        end_idx = start_idx + fold_size if fold < k - 1 else total_patients
+        # Calculate the step size to evenly distribute patients across folds
+        step_size = total_patients // k
         
-        # Get test patients for this fold
-        test_indices = list(range(start_idx, end_idx))
+        # Create a list of all available patient indices for this fold
+        available_indices = list(range(total_patients))
+        
+        # Select test patients for this fold - use patients_per_test
+        test_indices = []
+        for i in range(patients_per_test):
+            # Calculate starting index based on fold to ensure distribution
+            start_idx = (fold * patients_per_test + i) % total_patients
+            # Find the next available index starting from start_idx
+            for offset in range(total_patients):
+                idx = (start_idx + offset) % total_patients
+                if idx in available_indices:
+                    test_indices.append(idx)
+                    available_indices.remove(idx)  # Remove from available indices
+                    break
+        
         test_patients = [sorted_patients[i] for i in test_indices]
         
-        # Get validation patients (next fold_size patients, wrapping around if necessary)
-        val_start = end_idx
-        val_end = val_start + patients_per_val
-        if val_end > total_patients:
-            val_indices = list(range(val_start, total_patients)) + list(range(0, val_end - total_patients))
-        else:
-            val_indices = list(range(val_start, val_end))
+        # Select validation patients - also use patients_per_val
+        val_indices = []
+        for i in range(patients_per_val):
+            # Calculate starting index after test patients
+            start_idx = (fold * patients_per_test + patients_per_test + i) % total_patients
+            # Find the next available index
+            for offset in range(total_patients):
+                idx = (start_idx + offset) % total_patients
+                if idx in available_indices:
+                    val_indices.append(idx)
+                    available_indices.remove(idx)  # Remove from available indices
+                    break
+        
         val_patients = [sorted_patients[i] for i in val_indices]
         
         # Get training patients (remaining patients)
-        train_patients = [p for p in sorted_patients if p not in test_patients and p not in val_patients]
+        train_indices = available_indices  # All remaining indices are for training
+        train_patients = [sorted_patients[i] for i in train_indices]
         
         # Balance each split
         train_clips, train_videos = balance_split_clips(train_patients, patient_data, minority_ratio)
@@ -514,7 +531,7 @@ if __name__ == "__main__":
     output_dir = 'k_fold'  # All k-fold related files will be under this directory
     k = 3  # Number of folds
     epochs = 15 # Number of epochs for training
-    patients_per_test = 1  # Number of patients in each test set
+    patients_per_test = 3  # Number of patients in each test set
     
     # Setup k-fold cross-validation
     annotation_files, config_files = setup_k_fold_cross_validation(
