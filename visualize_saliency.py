@@ -37,13 +37,12 @@ def find_best_model(fold_dir: Path) -> Path:
     
     return checkpoints[0]
 
-def load_model_and_data(fold: int, num_random_samples: int = 5) -> list:
+def load_model_and_data(fold: int) -> list:
     """
-    Load model and randomly selected test data for a specific fold.
+    Load model and all test data for a specific fold.
     
     Args:
         fold: Fold number
-        num_random_samples: Number of random samples to select from test set
     
     Returns:
         list of tuples: [(model, input_data, true_label, sample_idx), ...]
@@ -62,7 +61,7 @@ def load_model_and_data(fold: int, num_random_samples: int = 5) -> list:
     print(f"Video IDs: {video_ids}")
 
     # Filter annotations for the specific video ID
-    filtered_annotations = filter_annotations_by_video(video_ids[0], config_file)
+    filter_annotations_by_video(video_ids[0], config_file)  # Keep only clips for the first video ID
     
     # Load the config file
     cfg = Config.fromfile(config_file)
@@ -79,16 +78,10 @@ def load_model_and_data(fold: int, num_random_samples: int = 5) -> list:
     with open(pred_file, 'rb') as f:
         predictions = pickle.load(f)
     
-    # Randomly select samples
-    total_samples = len(predictions)
-    random_indices = np.random.choice(total_samples, num_random_samples, replace=False)
-    print(f"Selected random sample indices: {random_indices}")
-    
     results = []
-    for sample_idx in random_indices:
+    for sample_idx in range(len(predictions)):  # Iterate over all samples
         # Get to the specific sample in dataloader
         for i, data_batch in enumerate(test_dataloader):
-            #print(f"data batch : {data_batch}")
             if i == sample_idx:
                 break
         
@@ -410,14 +403,19 @@ def main():
     
     # Process each fold
     n_folds = 3
-    num_random_samples = 5  # Number of random samples to process per fold
     
     for fold in range(n_folds):
         print(f"\nProcessing fold {fold}...")
         
         try:
-            # Load model and random samples
-            samples = load_model_and_data(fold, num_random_samples)
+            # Get the video ID for this fold
+            config_file = f'k_fold/stgcn/stgcn_fold{fold}.py'
+            video_ids = get_videos_in_test_split(config_file)
+            current_video_id = video_ids[0]  # Use the first video ID
+            print(f"Processing video ID: {current_video_id}")
+            
+            # Load model and all test data
+            samples = load_model_and_data(fold)
             
             for model, input_data, true_label, sample_idx in samples:
                 print(f"\nProcessing sample {sample_idx}")
@@ -441,8 +439,10 @@ def main():
                     pred_probs = torch.softmax(pred_scores, dim=1)[0]
                     pred_label = pred_probs.argmax().item()
                 
+                # Create save path with video ID included in the filename
+                save_path = output_dir / f'saliency_map_fold_{fold}_video_{current_video_id}_sample_{sample_idx}.png'
+                
                 # Plot and save
-                save_path = output_dir / f'saliency_map_fold_{fold}_sample_{sample_idx}.png'
                 plot_saliency(
                     input_data,
                     saliency_map,
