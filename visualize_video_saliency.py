@@ -182,6 +182,7 @@ def compute_saliency_map(model, input_tensor):
 def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model, frame_dir=None):
     """
     Plot original input and saliency map side by side.
+    Time on x-axis, keypoints on y-axis.
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
     
@@ -236,49 +237,55 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     input_vis = np.sqrt(np.sum(input_vis**2, axis=-1))
     input_vis = (input_vis - input_vis.min()) / (input_vis.max() - input_vis.min() + 1e-8)
     
+    # Transpose the data to put time on x-axis and keypoints on y-axis
+    input_vis = input_vis.T
+    
     im1 = ax1.imshow(input_vis, aspect='auto', cmap='viridis')
     
     ax1.set_title('Input Skeleton Motion')
-    ax1.set_xlabel('Keypoints')
-    ax1.set_ylabel('Time (frames)')
+    ax1.set_xlabel('Time (frames)')
+    ax1.set_ylabel('Keypoints')
     plt.colorbar(im1, ax=ax1)
     
-    # Add frame numbers
-    ax1.set_yticks(np.arange(0, input_vis.shape[0], 10))
-    ax1.set_yticklabels([f"{i}" for i in range(0, input_vis.shape[0], 10)])
+    # Add frame numbers on x-axis
+    ax1.set_xticks(np.arange(0, input_vis.shape[1], 10))
+    ax1.set_xticklabels([f"{i}" for i in range(0, input_vis.shape[1], 10)])
     
-    # Add keypoint group labels
+    # Add keypoint group labels on y-axis
     group_positions = []
     group_labels = []
     for group_name, indices in keypoint_groups.items():
         if indices:
             mid_point = (indices[0] + indices[-1]) / 2
             group_positions.append(mid_point)
-            group_labels.append(f"{group_name}\n({len(indices)} pts)")
+            group_labels.append(f"{group_name} ({len(indices)} pts)")
     
-    # Set keypoint ticks and rotate labels
-    ax1.set_xticks(group_positions)
-    ax1.set_xticklabels(group_labels, rotation=45, ha='right')
+    # Set keypoint ticks
+    ax1.set_yticks(group_positions)
+    ax1.set_yticklabels(group_labels)
     
     # Plot saliency map
     if saliency_map.ndim > 2:
         saliency_map = saliency_map.squeeze()
     saliency_norm = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
     
+    # Transpose the saliency map to put time on x-axis
+    saliency_norm = saliency_norm.T
+    
     im2 = ax2.imshow(saliency_norm, aspect='auto', cmap='hot')
     ax2.set_title(f'Saliency Map\nTrue: {"Seizure" if true_label == 1 else "Non-Seizure"}, ' + 
                   f'Pred: {"Seizure" if pred_label == 1 else "Non-Seizure"}')
-    ax2.set_xlabel('Keypoints')
-    ax2.set_ylabel('Time (frames)')
+    ax2.set_xlabel('Time (frames)')
+    ax2.set_ylabel('Keypoints')
     plt.colorbar(im2, ax=ax2)
     
-    # Add frame numbers
-    ax2.set_yticks(np.arange(0, saliency_map.shape[0], 10))
-    ax2.set_yticklabels([f"{i}" for i in range(0, saliency_map.shape[0], 10)])
+    # Add frame numbers on x-axis
+    ax2.set_xticks(np.arange(0, saliency_norm.shape[1], 10))
+    ax2.set_xticklabels([f"{i}" for i in range(0, saliency_norm.shape[1], 10)])
     
-    # Add same keypoint group labels
-    ax2.set_xticks(group_positions)
-    ax2.set_xticklabels(group_labels, rotation=45, ha='right')
+    # Add same keypoint group labels on y-axis
+    ax2.set_yticks(group_positions)
+    ax2.set_yticklabels(group_labels)
     
     # Add prediction confidence
     with torch.no_grad():
