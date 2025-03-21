@@ -15,6 +15,7 @@ from mmengine.config import Config
 from mmaction.apis import init_recognizer
 from mmengine.runner import Runner
 import os
+import json
 
 def find_best_model(fold_dir: Path) -> Path:
     """
@@ -56,6 +57,12 @@ def load_model_and_data(fold: int, num_random_samples: int = 5) -> list:
         raise FileNotFoundError(f"Error for fold {fold}: {e}")
     
     config_file = f'k_fold/stgcn/stgcn_fold{fold}.py'
+
+    video_ids = get_videos_in_test_split(config_file)
+    print(f"Video IDs: {video_ids}")
+
+    # Filter annotations for the specific video ID
+    filtered_annotations = filter_annotations_by_video(video_ids[0], config_file)
     
     # Load the config file
     cfg = Config.fromfile(config_file)
@@ -81,6 +88,7 @@ def load_model_and_data(fold: int, num_random_samples: int = 5) -> list:
     for sample_idx in random_indices:
         # Get to the specific sample in dataloader
         for i, data_batch in enumerate(test_dataloader):
+            #print(f"data batch : {data_batch}")
             if i == sample_idx:
                 break
         
@@ -306,6 +314,94 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
+
+def get_annotation_file_from_config(config_file: str) -> str:
+    """
+    Get the annotation file path from the configuration file.
+    
+    Args:
+        config_file: Path to the configuration file.
+    
+    Returns:
+        Path to the annotation file.
+    """
+    cfg = Config.fromfile(config_file)
+    return cfg.ann_file
+
+def get_videos_in_test_split(config_file: str) -> list:
+    """
+    Get video IDs from the test split in the annotation file.
+    
+    Args:
+        config_file: Path to the configuration file.
+    
+    Returns:
+        List of unique video IDs in the test split.
+    """
+    # Get the annotation file path from the config
+    annotation_file = get_annotation_file_from_config(config_file)
+    
+    # Load the annotation file
+    with open(annotation_file, 'rb') as f:  # Open in binary mode for pickle
+        annotations = pickle.load(f)
+    
+    # Extract video IDs from the test split
+    test_videos = annotations['split']['xsub_test']
+    
+    # Extract unique video IDs from the clip names
+    video_ids = set()
+    for clip in test_videos:
+        parts = clip.split('_')
+        if len(parts) >= 2:
+            video_id = parts[1]  # Extract the video ID
+            video_ids.add(video_id)
+    
+    return sorted(list(video_ids))
+
+def filter_annotations_by_video(video_id: str, config_file: str):
+    """
+    Filter the annotation file to keep clips of only one specified video and save it back to the same file.
+    
+    Args:
+        video_id: The video ID to filter by (e.g., '7953A100').
+        config_file: Path to the configuration file to get the annotation file path.
+    """
+    # Get the annotation file path from the config
+    annotation_file = get_annotation_file_from_config(config_file)
+    
+    # Load the annotation file
+    with open(annotation_file, 'rb') as f:  # Open in binary mode for pickle
+        annotations = pickle.load(f)
+    
+    # Filter clips for the specified video ID
+    filtered_clips = []
+    for clip in annotations['split']['xsub_test']:
+        if video_id in clip:
+            filtered_clips.append(clip)
+    
+    # Sort the filtered clips
+    filtered_clips.sort()
+    
+    # Create a new annotations structure
+    filtered_annotations = {
+        'split': {
+            'xsub_test': filtered_clips,
+            'xsub_train': annotations['split'].get('xsub_train', []),  # Keep other splits unchanged
+            # You can add other splits if needed
+        },
+        'annotations': []
+    }
+    
+    # Filter the annotations to keep only those for the specified video ID
+    for annotation in annotations['annotations']:
+        if video_id in annotation['frame_dir']:
+            filtered_annotations['annotations'].append(annotation)
+    
+    # Save the filtered annotations back to the same file
+    with open(annotation_file, 'wb') as f:
+        pickle.dump(filtered_annotations, f)
+    
+    print(f"Filtered annotations saved to {annotation_file} with clips for video ID: {video_id}")
 
 def main():
     # Create output directory
