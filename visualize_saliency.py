@@ -14,6 +14,7 @@ import mmcv
 from mmengine.config import Config
 from mmaction.apis import init_recognizer
 from mmengine.runner import Runner
+import os
 
 def find_best_model(fold_dir: Path) -> Path:
     """
@@ -35,15 +36,16 @@ def find_best_model(fold_dir: Path) -> Path:
     
     return checkpoints[0]
 
-def load_model_and_data(fold: int) -> tuple:
+def load_model_and_data(fold: int, num_random_samples: int = 5) -> list:
     """
-    Load model and test data for a specific fold.
+    Load model and randomly selected test data for a specific fold.
     
     Args:
         fold: Fold number
+        num_random_samples: Number of random samples to select from test set
     
     Returns:
-        tuple: (model, input_data, true_label)
+        list of tuples: [(model, input_data, true_label, sample_idx), ...]
     """
     # Find best model checkpoint
     fold_dir = Path(f'k_fold/work_dirs/fold{fold}')
@@ -63,37 +65,42 @@ def load_model_and_data(fold: int) -> tuple:
     model.eval()
     
     # Build the test dataset from config
-    from mmengine.registry import DATASETS
     test_dataloader = Runner.build_dataloader(cfg.test_dataloader)
     
-    # Get first batch of test data
-    for data_batch in test_dataloader:
-        break
-    
-    # Load predictions to get ground truth labels
+    # Load predictions to get total number of samples
     pred_file = f'k_fold/test_results/fold{fold}_predictions.pkl'
     with open(pred_file, 'rb') as f:
         predictions = pickle.load(f)
     
-    # Get first sample's ground truth label
-    true_label = predictions[0]['gt_label'].item()
+    # Randomly select samples
+    total_samples = len(predictions)
+    random_indices = np.random.choice(total_samples, num_random_samples, replace=False)
+    print(f"Selected random sample indices: {random_indices}")
     
-    # Get the input data from the batch and move to GPU
-    input_data = data_batch['inputs']
-    if isinstance(input_data, (list, tuple)):
-        input_data = input_data[0]
+    results = []
+    for sample_idx in random_indices:
+        # Get to the specific sample in dataloader
+        for i, data_batch in enumerate(test_dataloader):
+            if i == sample_idx:
+                break
+        
+        # Get the input data
+        input_data = data_batch['inputs']
+        if isinstance(input_data, (list, tuple)):
+            input_data = input_data[0]
+        
+        # Reshape input data
+        if isinstance(input_data, torch.Tensor):
+            input_data = input_data[0:1]  # Keep only first clip
+            input_data = input_data.unsqueeze(1)
+            input_data = input_data.cuda()
+        
+        # Get ground truth label
+        true_label = predictions[sample_idx]['gt_label'].item()
+        
+        results.append((model, input_data, true_label, sample_idx))
     
-    # Reshape input data to match STGCN requirements (N, M, T, V, C)
-    if isinstance(input_data, torch.Tensor):
-        # Take only the first sample (num_clips=10 in test_pipeline)
-        input_data = input_data[0:1]  # Keep only first clip
-        # Add M dimension: [1, 90, 133, 3] -> [1, 1, 90, 133, 3]
-        input_data = input_data.unsqueeze(1)
-        # Move to GPU
-        input_data = input_data.cuda()
-        print(f"Reshaped input data shape: {input_data.shape}")
-    
-    return model, input_data, true_label
+    return results
 
 def compute_saliency_map(model, input_tensor):
     """
@@ -171,33 +178,65 @@ def compute_saliency_map(model, input_tensor):
         
     return saliency.detach().cpu().numpy()
 
-def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model):
+def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model, frame_dir=None):
     """
     Plot original input and saliency map side by side.
-    
-    Args:
-        input_data: Original input data (N, M, T, V, C)
-        saliency_map: Generated saliency map (T, V)
-        true_label: Ground truth label
-        pred_label: Predicted label
-        save_path: Path to save visualization
-        model: The trained model for confidence computation
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
     
-    # Plot original input - combine all channels to show skeleton better
-    # Debug print to check shapes
-    print(f"Input data shape before processing: {input_data.shape}")
-    input_vis = input_data.squeeze()  # Remove N and M dimensions if present
-    print(f"Input data shape after squeeze: {input_vis.shape}")
-    input_vis = input_vis.detach().cpu().numpy()  # Convert to numpy
-    input_vis = np.sqrt(np.sum(input_vis**2, axis=-1))  # Combine channels using magnitude
-    print(f"Final input visualization shape: {input_vis.shape}")
+    # Extract detailed clip information from frame_dir
+    clip_info = "Unknown Clip"
+    if frame_dir:
+        try:
+            # Assuming frame_dir format: path/to/frames/patient_id_video_id_clip_id/
+            clip_name = os.path.basename(frame_dir)
+            parts = clip_name.split('_')
+            if len(parts) >= 3:
+                patient_id = parts[0]
+                video_id = parts[1]
+                clip_id = '_'.join(parts[2:])  # Join remaining parts in case of underscores
+                clip_info = f"Patient: {patient_id}\nVideo: {video_id}\nClip: {clip_id}"
+            else:
+                clip_info = clip_name
+        except Exception as e:
+            print(f"Error parsing frame directory: {e}")
+            clip_info = os.path.basename(frame_dir)
     
-    # Normalize input visualization
+    # Create main title with detailed clip info
+    clip_type = "Seizure" if true_label == 1 else "Non-Seizure"
+    main_title = f"{clip_info}\nType: {clip_type}"
+    fig.suptitle(main_title, fontsize=12, y=1.02)
+    
+    # Define keypoint groups according to COCO WholeBody
+    keypoint_groups = {
+        'Body': list(range(0, 17)),      # Body keypoints
+        'Feet': list(range(17, 23)),     # Foot keypoints (3 per foot)
+        'Face': list(range(23, 91)),     # Face keypoints (68 points)
+        'Left Hand': list(range(91, 112)), # Left hand keypoints (21 points)
+        'Right Hand': list(range(112, 133)) # Right hand keypoints (21 points)
+    }
+    
+    # Detailed body keypoint labels
+    body_keypoints = {
+        0: 'nose',
+        1: 'left_eye', 2: 'right_eye',
+        3: 'left_ear', 4: 'right_ear',
+        5: 'left_shoulder', 6: 'right_shoulder',
+        7: 'left_elbow', 8: 'right_elbow',
+        9: 'left_wrist', 10: 'right_wrist',
+        11: 'left_hip', 12: 'right_hip',
+        13: 'left_knee', 14: 'right_knee',
+        15: 'left_ankle', 16: 'right_ankle'
+    }
+    
+    # Plot original input
+    input_vis = input_data.squeeze()
+    input_vis = input_vis.detach().cpu().numpy()
+    input_vis = np.sqrt(np.sum(input_vis**2, axis=-1))
     input_vis = (input_vis - input_vis.min()) / (input_vis.max() - input_vis.min() + 1e-8)
     
     im1 = ax1.imshow(input_vis, aspect='auto', cmap='viridis')
+    
     ax1.set_title('Input Skeleton Motion')
     ax1.set_xlabel('Keypoints')
     ax1.set_ylabel('Time (frames)')
@@ -207,22 +246,27 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     ax1.set_yticks(np.arange(0, input_vis.shape[0], 10))
     ax1.set_yticklabels([f"{i}" for i in range(0, input_vis.shape[0], 10)])
     
-    # Add keypoint numbers
-    ax1.set_xticks(np.arange(0, input_vis.shape[1], 10))
-    ax1.set_xticklabels([f"{i}" for i in range(0, input_vis.shape[1], 10)])
+    # Add keypoint group labels
+    group_positions = []
+    group_labels = []
+    for group_name, indices in keypoint_groups.items():
+        if indices:
+            mid_point = (indices[0] + indices[-1]) / 2
+            group_positions.append(mid_point)
+            group_labels.append(f"{group_name}\n({len(indices)} pts)")
     
-    # Ensure saliency map is 2D and normalize it
+    # Set keypoint ticks and rotate labels
+    ax1.set_xticks(group_positions)
+    ax1.set_xticklabels(group_labels, rotation=45, ha='right')
+    
+    # Plot saliency map
     if saliency_map.ndim > 2:
         saliency_map = saliency_map.squeeze()
-    print(f"Saliency map shape for plotting: {saliency_map.shape}")
-    
-    # Normalize saliency map to [0, 1]
     saliency_norm = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
     
-    # Plot saliency map with increased contrast
     im2 = ax2.imshow(saliency_norm, aspect='auto', cmap='hot')
-    ax2.set_title(f'Saliency Map\nTrue: {"Positive" if true_label == 1 else "Negative"}, ' + 
-                  f'Pred: {"Positive" if pred_label == 1 else "Negative"}')
+    ax2.set_title(f'Saliency Map\nTrue: {"Seizure" if true_label == 1 else "Non-Seizure"}, ' + 
+                  f'Pred: {"Seizure" if pred_label == 1 else "Non-Seizure"}')
     ax2.set_xlabel('Keypoints')
     ax2.set_ylabel('Time (frames)')
     plt.colorbar(im2, ax=ax2)
@@ -231,24 +275,24 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     ax2.set_yticks(np.arange(0, saliency_map.shape[0], 10))
     ax2.set_yticklabels([f"{i}" for i in range(0, saliency_map.shape[0], 10)])
     
-    # Add keypoint numbers
-    ax2.set_xticks(np.arange(0, saliency_map.shape[1], 10))
-    ax2.set_xticklabels([f"{i}" for i in range(0, saliency_map.shape[1], 10)])
+    # Add same keypoint group labels
+    ax2.set_xticks(group_positions)
+    ax2.set_xticklabels(group_labels, rotation=45, ha='right')
     
-    # Add text showing prediction confidence
+    # Add prediction confidence
     with torch.no_grad():
         pred = model(input_data.cuda(), return_loss=False)
         if isinstance(pred, (list, tuple)):
             pred = pred[0]
-        pred = pred.mean(dim=2).squeeze(1)  # Average over time, remove M dimension
-        pred_scores = pred.mean(dim=-1)  # Average over keypoints
-        if pred_scores.size(1) != 2:
+        pred = pred.mean(dim=2).squeeze(1)
+        pred_scores = pred.mean(dim=-1)
+        if pred_scores.size(1) > 2:
             binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
             binary_scores[:, 0] = pred_scores[:, 0]
             binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
             pred_scores = binary_scores
         probs = torch.softmax(pred_scores, dim=1)[0]
-        
+    
     confidence = float(probs[pred_label])
     plt.figtext(0.02, 0.02, f'Prediction confidence: {confidence:.2%}', 
                 fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
@@ -264,53 +308,49 @@ def main():
     
     # Process each fold
     n_folds = 3
+    num_random_samples = 5  # Number of random samples to process per fold
     
     for fold in range(n_folds):
         print(f"\nProcessing fold {fold}...")
         
         try:
-            # Load model and data
-            model, input_data, true_label = load_model_and_data(fold)
-            print(f"True label: {true_label}")
+            # Load model and random samples
+            samples = load_model_and_data(fold, num_random_samples)
             
-            # Compute saliency map
-            saliency_map = compute_saliency_map(model, input_data)
-            
-            # Get prediction
-            with torch.no_grad():
-                pred = model(input_data, return_loss=False)
-                if isinstance(pred, (list, tuple)):
-                    pred = pred[0]
+            for model, input_data, true_label, sample_idx in samples:
+                print(f"\nProcessing sample {sample_idx}")
+                print(f"True label: {true_label}")
                 
-                # Average over time and keypoints dimensions
-                pred = pred.mean(dim=2)  # Average over time
-                pred = pred.squeeze(1)    # Remove M dimension
-                pred_scores = pred.mean(dim=-1)  # Average over keypoints
+                # Compute saliency map
+                saliency_map = compute_saliency_map(model, input_data)
                 
-                # Convert to binary classification
-                if pred_scores.size(1) > 2:
-                    binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
-                    binary_scores[:, 0] = pred_scores[:, 0]  # Negative class
-                    binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)  # Positive class
-                    pred_scores = binary_scores
+                # Get prediction
+                with torch.no_grad():
+                    pred = model(input_data, return_loss=False)
+                    if isinstance(pred, (list, tuple)):
+                        pred = pred[0]
+                    pred = pred.mean(dim=2).squeeze(1)
+                    pred_scores = pred.mean(dim=-1)
+                    if pred_scores.size(1) > 2:
+                        binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                        binary_scores[:, 0] = pred_scores[:, 0]
+                        binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                        pred_scores = binary_scores
+                    pred_probs = torch.softmax(pred_scores, dim=1)[0]
+                    pred_label = pred_probs.argmax().item()
                 
-                pred_probs = torch.softmax(pred_scores, dim=1)[0]
-                pred_label = pred_probs.argmax().item()
-                print(f"Binary prediction probabilities: {pred_probs}")
-                print(f"Predicted label: {pred_label}")
-            
-            # Plot and save
-            save_path = output_dir / f'saliency_map_fold_{fold}.png'
-            plot_saliency(
-                input_data,
-                saliency_map,
-                true_label,
-                pred_label,
-                save_path,
-                model
-            )
-            
-            print(f"Generated saliency map for fold {fold}")
+                # Plot and save
+                save_path = output_dir / f'saliency_map_fold_{fold}_sample_{sample_idx}.png'
+                plot_saliency(
+                    input_data,
+                    saliency_map,
+                    true_label,
+                    pred_label,
+                    save_path,
+                    model
+                )
+                
+                print(f"Generated saliency map for sample {sample_idx}")
             
         except Exception as e:
             print(f"Error processing fold {fold}: {e}")
