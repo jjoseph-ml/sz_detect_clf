@@ -182,6 +182,7 @@ def compute_saliency_map(model, input_tensor):
 def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model, frame_dir=None):
     """
     Plot original input and saliency map side by side with time on x-axis.
+    Visualizes the motion between frames rather than absolute position magnitudes.
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
     
@@ -217,38 +218,36 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
         'Right Hand': list(range(112, 133)) # Right hand keypoints (21 points)
     }
     
-    # Detailed body keypoint labels
-    body_keypoints = {
-        0: 'nose',
-        1: 'left_eye', 2: 'right_eye',
-        3: 'left_ear', 4: 'right_ear',
-        5: 'left_shoulder', 6: 'right_shoulder',
-        7: 'left_elbow', 8: 'right_elbow',
-        9: 'left_wrist', 10: 'right_wrist',
-        11: 'left_hip', 12: 'right_hip',
-        13: 'left_knee', 14: 'right_knee',
-        15: 'left_ankle', 16: 'right_ankle'
-    }
+    # Calculate motion between frames
+    input_vis = input_data.squeeze().detach().cpu().numpy()  # Shape: (T, V, C)
     
-    # Plot original input - transposed to have time on x-axis
-    input_vis = input_data.squeeze()
-    input_vis = input_vis.detach().cpu().numpy()
-    input_vis = np.sqrt(np.sum(input_vis**2, axis=-1))
-    input_vis = (input_vis - input_vis.min()) / (input_vis.max() - input_vis.min() + 1e-8)
+    # Ensure input_vis has the expected shape
+    if input_vis.ndim != 3:
+        raise ValueError(f"Expected input shape (T, V, C), but got {input_vis.shape}")
     
-    # Transpose the data to swap axes
-    input_vis = input_vis.T
+    # Calculate Euclidean distance between consecutive frames for each keypoint
+    motion_data = np.sqrt(np.sum(np.diff(input_vis, axis=0)**2, axis=-1))  # Shape: (T-1, V)
     
-    im1 = ax1.imshow(input_vis, aspect='auto', cmap='viridis')
+    # Add a zero frame for the first frame to maintain the same number of frames
+    motion_data = np.concatenate(([np.zeros(motion_data.shape[1])], motion_data), axis=0)  # Shape: (T, V)
     
-    ax1.set_title('Input Skeleton Motion')
+    # Normalize motion data for visualization
+    motion_data = (motion_data - motion_data.min()) / (motion_data.max() - motion_data.min() + 1e-8)
+    
+    # Transpose the motion data to have keypoints on y-axis and time on x-axis
+    motion_data = motion_data.T
+    
+    # Plot motion data
+    im1 = ax1.imshow(motion_data, aspect='auto', cmap='viridis')
+    
+    ax1.set_title('Motion Between Frames')
     ax1.set_ylabel('Keypoints')
     ax1.set_xlabel('Time (frames)')
     plt.colorbar(im1, ax=ax1)
     
     # Add frame numbers on x-axis
-    ax1.set_xticks(np.arange(0, input_vis.shape[1], 10))
-    ax1.set_xticklabels([f"{i}" for i in range(0, input_vis.shape[1], 10)])
+    ax1.set_xticks(np.arange(0, motion_data.shape[1], 10))
+    ax1.set_xticklabels([f"{i}" for i in range(0, motion_data.shape[1], 10)])
     
     # Add keypoint group labels on y-axis
     group_positions = []
@@ -263,7 +262,7 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     ax1.set_yticks(group_positions)
     ax1.set_yticklabels(group_labels)
     
-    # Plot saliency map - transposed to have time on x-axis
+    # Plot saliency map
     if saliency_map.ndim > 2:
         saliency_map = saliency_map.squeeze()
     saliency_norm = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
