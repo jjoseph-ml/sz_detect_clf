@@ -9,6 +9,7 @@ import traceback
 import warnings
 import logging
 import sys
+import shutil  # Added for directory cleanup
 
 # Suppress specific warnings
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -93,28 +94,39 @@ def determine_clip_label(start_frame, end_frame, seizure_range, fps=30.0):
     
     return 1 if is_seizure else 0
 
-def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip=100):
+def cleanup_output_directory(output_dir):
+    """
+    Clean up the output directory by removing all existing files.
+    
+    Args:
+        output_dir: Directory to clean up
+    """
+    if os.path.exists(output_dir):
+        print(f"Cleaning up existing files in {output_dir}...")
+        # Option 1: Remove and recreate the directory
+        shutil.rmtree(output_dir)
+        os.makedirs(output_dir)
+        print(f"Cleaned up {output_dir}")
+    else:
+        # Create the directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Created new directory {output_dir}")
+
+def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip=100, clip_annotations_file=None):
     """Process all keypoint files, split into clips, and save with labels."""
     
-    # Clean .pkl files from output directory
-    if os.path.exists(output_dir):
-        print(f"Cleaning .pkl files from output directory: {output_dir}")
-        for file in os.listdir(output_dir):
-            if file.endswith('.pkl'):
-                file_path = os.path.join(output_dir, file)
-                try:
-                    os.unlink(file_path)
-                except Exception as e:
-                    print(f"Error deleting {file_path}: {e}")
-        
-        # Wait for user confirmation
-        response = input("\nDirectory cleaned. Press Enter to continue or 'q' to quit: ")
-        if response.lower() == 'q':
-            print("Operation cancelled by user")
-            sys.exit(0)
+    # If clip_annotations_file is not specified, use default path
+    if clip_annotations_file is None:
+        clip_annotations_file = os.path.join('preprocessing', 'video_annotations', 'clip_annotations.txt')
     
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
+    # Clean up the output directory before processing
+    cleanup_output_directory(output_dir)
+    
+    # Pause execution and wait for user input
+    user_input = input("\nDirectory cleanup complete. Press Enter to continue or type 'exit' to abort: ")
+    if user_input.lower() == 'exit':
+        print("Operation aborted by user.")
+        return
     
     # Read video annotations
     print("Reading video annotations...")
@@ -232,7 +244,6 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
             failed_videos.append((keypoint_file, str(e)))
     
     # Save clip annotations to a text file
-    clip_annotations_file = os.path.join('preprocessing', 'video_annotations', 'clip_annotations.txt')
     print(f"Saving clip annotations to {clip_annotations_file}")
     
     # Sort clip annotations to ensure segments are in order
@@ -282,13 +293,24 @@ if __name__ == '__main__':
         'keypoints_dir': 'preprocessing/video_keypoints',
         'output_dir': 'preprocessing/clip_keypoints',
         'annotation_file': 'preprocessing/video_annotations/video_annotations.txt',
-        'frames_per_clip': 90  # Same as in clip_and_annotate.ipynb
+        'frames_per_clip': 120,
+        'clip_annotations_file': 'preprocessing/video_annotations/clip_annotations.txt'  # Added clip_annotations_file
     }
+    
+    print("Starting keypoints processing with the following configuration:")
+    print(f"- Keypoints directory: {config['keypoints_dir']}")
+    print(f"- Output directory: {config['output_dir']}")
+    print(f"- Annotation file: {config['annotation_file']}")
+    print(f"- Frames per clip: {config['frames_per_clip']}")
+    print(f"- Clip annotations file: {config['clip_annotations_file']}")
     
     # Run processing
     process_all_keypoints(
         config['keypoints_dir'],
         config['output_dir'],
         config['annotation_file'],
-        config['frames_per_clip']
+        config['frames_per_clip'],
+        config['clip_annotations_file']
     )
+    
+    print("\nProcessing complete. Check the output directory for generated clips.")
