@@ -16,16 +16,11 @@ from mmaction.apis import init_recognizer
 from mmengine.runner import Runner
 import os
 import json
+import re
 
 def find_best_model(fold_dir: Path) -> Path:
     """
     Find the best model checkpoint in the fold directory.
-    
-    Args:
-        fold_dir: Directory containing model checkpoints
-    
-    Returns:
-        Path to the best model checkpoint
     """
     checkpoints = list(fold_dir.glob('best_acc_top1_epoch*.pth'))
     if not checkpoints:
@@ -40,12 +35,6 @@ def find_best_model(fold_dir: Path) -> Path:
 def load_model_and_data(fold: int) -> list:
     """
     Load model and all test data for a specific fold.
-    
-    Args:
-        fold: Fold number
-    
-    Returns:
-        list of tuples: [(model, input_data, true_label, sample_idx), ...]
     """
     # Find best model checkpoint
     fold_dir = Path(f'k_fold/work_dirs/fold{fold}')
@@ -106,13 +95,6 @@ def load_model_and_data(fold: int) -> list:
 def compute_saliency_map(model, input_tensor):
     """
     Compute saliency map for given input and model.
-    
-    Args:
-        model: MMAction2 model
-        input_tensor: Input tensor with shape (N, M, T, V, C)
-    
-    Returns:
-        Saliency map as numpy array
     """
     # Ensure input tensor is on GPU and requires grad
     input_tensor = input_tensor.cuda()
@@ -310,12 +292,6 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
 def get_annotation_file_from_config(config_file: str) -> str:
     """
     Get the annotation file path from the configuration file.
-    
-    Args:
-        config_file: Path to the configuration file.
-    
-    Returns:
-        Path to the annotation file.
     """
     cfg = Config.fromfile(config_file)
     return cfg.ann_file
@@ -323,12 +299,7 @@ def get_annotation_file_from_config(config_file: str) -> str:
 def get_videos_in_test_split(config_file: str) -> list:
     """
     Get video IDs from the test split in the annotation file.
-    
-    Args:
-        config_file: Path to the configuration file.
-    
-    Returns:
-        List of unique video IDs in the test split.
+
     """
     # Get the annotation file path from the config
     annotation_file = get_annotation_file_from_config(config_file)
@@ -350,13 +321,64 @@ def get_videos_in_test_split(config_file: str) -> list:
     
     return sorted(list(video_ids))
 
+def find_all_clips_for_video(video_id: str, config_file: str):
+    """
+    Find all clips for a specific video from preprocessing/clip_keypoints directory
+    and add them to xsub_test in order, avoiding augmented clips.
+    """
+    # Define the preprocessing directory
+    preprocessing_dir = Path('preprocessing/clip_keypoints')
+    
+    # Check if directory exists
+    if not preprocessing_dir.exists():
+        print(f"Warning: {preprocessing_dir} does not exist. Using existing clips only.")
+        return []
+    
+    # Find all clip files for the specified video ID
+    # Files are named like 05463487_79519000_Seg_1.pkl
+    clip_files = []
+    for item in preprocessing_dir.glob(f'*_{video_id}_Seg_*.pkl'):
+        if item.is_file() and "_aug" not in item.name:
+            clip_files.append(item)
+    
+    # Extract clip names (without .pkl extension)
+    clip_names = [file.stem for file in clip_files]
+    print(f"Found {len(clip_names)} clips for video {video_id}")
+    
+    # Create a list of (clip_name, segment_number) tuples for sorting
+    clip_with_segment = []
+    for clip in clip_names:
+        try:
+            # Split by '_Seg_' and take the part after it
+            seg_part = clip.split('_Seg_')[1]
+            # Convert to integer (handle any additional parts by splitting again)
+            if '_' in seg_part:
+                seg_num = int(seg_part.split('_')[0])
+            else:
+                seg_num = int(seg_part)
+            clip_with_segment.append((clip, seg_num))
+            #print(f"Clip: {clip}, Segment: {seg_num}")
+        except (IndexError, ValueError) as e:
+            # If parsing fails, use a large number to sort it at the end
+            print(f"Error parsing segment number for {clip}: {e}")
+            clip_with_segment.append((clip, 999999))
+    
+    # Sort by segment number
+    clip_with_segment.sort(key=lambda x: x[1])
+    
+    # Extract sorted clip names
+    sorted_clip_names = [item[0] for item in clip_with_segment]
+    
+    print(f"Found {len(sorted_clip_names)} non-augmented clips for video {video_id} in preprocessing directory")
+    print(f"First 5 sorted clips: {sorted_clip_names[:5]}")
+    print(f"Last 5 sorted clips: {sorted_clip_names[-5:]}")
+    
+    return sorted_clip_names
+
 def filter_annotations_by_video(video_id: str, config_file: str):
     """
-    Filter the annotation file to keep clips of only one specified video and save it back to the same file.
-    
-    Args:
-        video_id: The video ID to filter by (e.g., '7953A100').
-        config_file: Path to the configuration file to get the annotation file path.
+    Filter the annotation file to keep clips of only one specified video 
+    and save it back to the same file. Removes augmented clips.
     """
     # Get the annotation file path from the config
     annotation_file = get_annotation_file_from_config(config_file)
@@ -365,35 +387,161 @@ def filter_annotations_by_video(video_id: str, config_file: str):
     with open(annotation_file, 'rb') as f:  # Open in binary mode for pickle
         annotations = pickle.load(f)
     
-    # Filter clips for the specified video ID
-    filtered_clips = []
-    for clip in annotations['split']['xsub_test']:
-        if video_id in clip:
-            filtered_clips.append(clip)
+    # Find all clips for this video from preprocessing directory
+    all_clips = find_all_clips_for_video(video_id, config_file)
+    print(f"Found {len(all_clips)} clips for video {video_id} in preprocessing directory")
+
+    # If no clips found in preprocessing directory, use existing filtered clips
+    '''if not all_clips:
+        # Filter clips for the specified video ID and remove augmented clips
+        filtered_clips = []
+        for clip in annotations['split']['xsub_test']:
+            if video_id in clip and "_aug" not in clip:
+                filtered_clips.append(clip)
+    else:
+        # Use clips found in preprocessing directory
+        filtered_clips = all_clips
     
     # Sort the filtered clips
     filtered_clips.sort()
     
-    # Create a new annotations structure
+    # Create a new annotations structure'''
     filtered_annotations = {
         'split': {
-            'xsub_test': filtered_clips,
+            'xsub_test': all_clips,
             'xsub_train': annotations['split'].get('xsub_train', []),  # Keep other splits unchanged
             # You can add other splits if needed
         },
         'annotations': []
     }
     
-    # Filter the annotations to keep only those for the specified video ID
+    # Filter the annotations to keep only those for the specified video ID and non-augmented
+    # Also add new annotations for clips found in preprocessing directory if they don't exist
+    existing_frame_dirs = set()
     for annotation in annotations['annotations']:
-        if video_id in annotation['frame_dir']:
+        if video_id in annotation['frame_dir'] and "_aug" not in annotation['frame_dir']:
             filtered_annotations['annotations'].append(annotation)
+            existing_frame_dirs.add(annotation['frame_dir'])
+    
+    # Check if we need to add new annotations for clips found in preprocessing
+    for clip in all_clips:
+        if clip not in existing_frame_dirs:
+            print(f"Warning: No annotation found for clip {clip}. This clip will be included in the split but may not have annotation data.")
     
     # Save the filtered annotations back to the same file
     with open(annotation_file, 'wb') as f:
         pickle.dump(filtered_annotations, f)
+
+    # Create a unique filename for the text annotations based on the config file
+    # Extract fold number from config file path
+    fold_num = "unknown"
+    if "fold" in config_file:
+        fold_num = config_file.split("fold")[-1].split(".")[0]
+    
+    txt_annotation_file = f'k_fold/saliency_maps/annotations_fold{fold_num}_video_{video_id}.txt'
+    
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(txt_annotation_file), exist_ok=True)
+    
+    # Write the annotations to the text file
+    write_annotations_to_txt(filtered_annotations, txt_annotation_file)
     
     print(f"Filtered annotations saved to {annotation_file} with clips for video ID: {video_id}")
+    print(f"Human-readable annotations saved to {txt_annotation_file}")
+    print(f"Total non-augmented clips: {len(all_clips)}")
+    print(f"Total non-augmented annotations: {len(filtered_annotations['annotations'])}")
+
+def write_annotations_to_txt(annotations, output_file):
+    """
+    Write the annotations to a text file in a JSON-like format.
+    
+    Args:
+        annotations (dict): The annotations dictionary
+        output_file (str): Path to the output text file
+    """
+    with open(output_file, 'w') as f:
+        f.write("{\n")
+        
+        # Write split information
+        f.write("    \"split\":\n")
+        f.write("        {\n")
+        
+        # Write each split
+        splits = list(annotations['split'].keys())
+        for i, split_name in enumerate(splits):
+            clips = annotations['split'][split_name]
+            f.write(f"            '{split_name}':\n")
+            f.write("                [")
+            
+            # For xsub_test, show all clips
+            if split_name == 'xsub_test':
+                for j, clip in enumerate(clips):
+                    if j % 3 == 0:  # Start a new line every 3 clips for readability
+                        f.write("\n                    ")
+                    f.write(f"'{clip}'")
+                    if j < len(clips) - 1:
+                        f.write(", ")
+            else:
+                # For other splits, show a limited number
+                max_clips_to_show = 20
+                for j, clip in enumerate(clips[:max_clips_to_show]):
+                    if j % 5 == 0:  # Start a new line every 5 clips for readability
+                        f.write("\n                    ")
+                    f.write(f"'{clip}'")
+                    if j < min(len(clips), max_clips_to_show) - 1:
+                        f.write(", ")
+                
+                # Indicate if there are more clips
+                if len(clips) > max_clips_to_show:
+                    f.write(f"\n                    ... and {len(clips) - max_clips_to_show} more clips")
+            
+            f.write("\n                ]")
+            if i < len(splits) - 1:
+                f.write(",")
+            f.write("\n")
+        
+        f.write("        },\n\n")
+        
+        # Write annotation details
+        f.write("    \"annotations\":\n")
+        f.write("        [\n")
+        
+        # Write each annotation
+        for i, ann in enumerate(annotations['annotations']):
+            f.write("            {\n")
+            
+            # Write annotation fields
+            f.write(f"                'frame_dir': '{ann['frame_dir']}',\n")
+            f.write(f"                'label': {ann['label']},\n")
+            
+            # Add other fields if they exist
+            if 'img_shape' in ann:
+                f.write(f"                'img_shape': {ann['img_shape']},\n")
+            if 'original_shape' in ann:
+                f.write(f"                'original_shape': {ann['original_shape']},\n")
+            if 'total_frames' in ann:
+                f.write(f"                'total_frames': {ann['total_frames']},\n")
+            
+            # Handle keypoint data - show shape instead of full array
+            if 'keypoint' in ann:
+                kp_shape = np.array(ann['keypoint']).shape
+                f.write(f"                'keypoint': array with shape {kp_shape},\n")
+            if 'keypoint_score' in ann:
+                kp_score_shape = np.array(ann['keypoint_score']).shape
+                f.write(f"                'keypoint_score': array with shape {kp_score_shape}")
+                if i < len(annotations['annotations']) - 1:
+                    f.write(",\n")
+                else:
+                    f.write("\n")
+            
+            f.write("            }")
+            if i < len(annotations['annotations']) - 1:
+                f.write(",\n")
+            else:
+                f.write("\n")
+        
+        f.write("        ]\n")
+        f.write("}\n")
 
 def main():
     # Create output directory
