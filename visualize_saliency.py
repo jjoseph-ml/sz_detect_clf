@@ -5,6 +5,7 @@ Uses trained models from k-fold cross validation to show which input features
 are most important for predictions.
 """
 
+import sys
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -36,6 +37,7 @@ def find_best_model(fold_dir: Path) -> Path:
 def load_model_and_data(fold: int) -> list:
     """
     Load model and all test data for a specific fold.
+    Maps predictions to clip names from the annotation file.
     """
     # Find best model checkpoint
     fold_dir = Path(f'k_fold/work_dirs/fold{fold}')
@@ -68,6 +70,23 @@ def load_model_and_data(fold: int) -> list:
     with open(pred_file, 'rb') as f:
         predictions = pickle.load(f)
     
+    # Get the clip names from the annotation file
+    annotation_file = get_annotation_file_from_config(config_file)
+    with open(annotation_file, 'rb') as f:
+        annotations = pickle.load(f)
+    clip_names = annotations['split']['xsub_test']
+    
+    print(f"Number of predictions: {len(predictions)}")
+    print(f"Number of clips in annotation file: {len(clip_names)}")
+    
+    # If the number of predictions matches the number of clips, we can map them directly
+    use_clip_names = len(predictions) == len(clip_names)
+    if use_clip_names:
+        print("Number of predictions matches number of clips - will use clip names for filenames")
+    else:
+        print(f"Warning: Number of predictions ({len(predictions)}) doesn't match number of clips ({len(clip_names)})")
+        print("Will use sample indices for filenames instead")
+    
     results = []
     for sample_idx in range(len(predictions)):  # Iterate over all samples
         # Get to the specific sample in dataloader
@@ -89,7 +108,12 @@ def load_model_and_data(fold: int) -> list:
         # Get ground truth label
         true_label = predictions[sample_idx]['gt_label'].item()
         
-        results.append((model, input_data, true_label, sample_idx))
+        # Get the clip name if available and numbers match
+        clip_name = None
+        if use_clip_names and sample_idx < len(clip_names):
+            clip_name = clip_names[sample_idx]
+        
+        results.append((model, input_data, true_label, sample_idx, clip_name))
     
     return results
 
@@ -162,34 +186,25 @@ def compute_saliency_map(model, input_tensor):
         
     return saliency.detach().cpu().numpy()
 
-def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model, frame_dir=None):
+def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model=None, clip_name=None):
     """
-    Plot original input and saliency map side by side with time on x-axis.
-    Visualizes the motion between frames rather than absolute position magnitudes.
+    Plot the saliency map and save it to a file.
+    
+    Args:
+        input_data (torch.Tensor): Input data tensor
+        saliency_map (torch.Tensor): Saliency map tensor
+        true_label (int): True label (0 or 1)
+        pred_label (int): Predicted label (0 or 1)
+        save_path (Path): Path to save the plot
+        model (nn.Module, optional): Model used for prediction
+        clip_name (str, optional): Name of the clip
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
     
-    # Extract detailed clip information from frame_dir
-    clip_info = "Unknown Clip"
-    if frame_dir:
-        try:
-            # Assuming frame_dir format: path/to/frames/patient_id_video_id_clip_id/
-            clip_name = os.path.basename(frame_dir)
-            parts = clip_name.split('_')
-            if len(parts) >= 3:
-                patient_id = parts[0]
-                video_id = parts[1]
-                clip_id = '_'.join(parts[2:])  # Join remaining parts in case of underscores
-                clip_info = f"Patient: {patient_id}\nVideo: {video_id}\nClip: {clip_id}"
-            else:
-                clip_info = clip_name
-        except Exception as e:
-            print(f"Error parsing frame directory: {e}")
-            clip_info = os.path.basename(frame_dir)
-    
-    # Create main title with detailed clip info
+    # Create main title with clip name
+    clip_display = clip_name if clip_name else "Unknown Clip"
     clip_type = "Seizure" if true_label == 1 else "Non-Seizure"
-    main_title = f"{clip_info}\nType: {clip_type}"
+    main_title = f"Clip: {clip_display}\nType: {clip_type}"
     fig.suptitle(main_title, fontsize=12, y=1.02)
     
     # Define keypoint groups according to COCO WholeBody
@@ -254,8 +269,11 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     saliency_norm = saliency_norm.T
     
     im2 = ax2.imshow(saliency_norm, aspect='auto', cmap='hot')
+    
+    # Set title without clip name, just prediction info
     ax2.set_title(f'Saliency Map\nTrue: {"Seizure" if true_label == 1 else "Non-Seizure"}, ' + 
                   f'Pred: {"Seizure" if pred_label == 1 else "Non-Seizure"}')
+    
     ax2.set_ylabel('Keypoints')
     ax2.set_xlabel('Time (frames)')
     plt.colorbar(im2, ax=ax2)
@@ -376,10 +394,15 @@ def find_all_clips_for_video(video_id: str, config_file: str):
     
     return sorted_clip_names
 
-def filter_annotations_by_video(video_id: str, config_file: str):
+def filter_annotations_by_video(video_id: str, config_file: str, output_dir: Path = None):
     """
     Filter the annotation file to keep clips of only one specified video 
     and save it back to the same file. Removes augmented clips.
+    
+    Args:
+        video_id (str): The video ID to filter for
+        config_file (str): Path to the configuration file
+        output_dir (Path, optional): Directory to save text annotation file
     """
     # Get the annotation file path from the config
     annotation_file = get_annotation_file_from_config(config_file)
@@ -392,32 +415,16 @@ def filter_annotations_by_video(video_id: str, config_file: str):
     all_clips = find_all_clips_for_video(video_id, config_file)
     print(f"Found {len(all_clips)} clips for video {video_id} in preprocessing directory")
 
-    # If no clips found in preprocessing directory, use existing filtered clips
-    '''if not all_clips:
-        # Filter clips for the specified video ID and remove augmented clips
-        filtered_clips = []
-        for clip in annotations['split']['xsub_test']:
-            if video_id in clip and "_aug" not in clip:
-                filtered_clips.append(clip)
-    else:
-        # Use clips found in preprocessing directory
-        filtered_clips = all_clips
-    
-    # Sort the filtered clips
-    filtered_clips.sort()
-    
-    # Create a new annotations structure'''
+    # Create filtered annotations
     filtered_annotations = {
         'split': {
             'xsub_test': all_clips,
             'xsub_train': annotations['split'].get('xsub_train', []),  # Keep other splits unchanged
-            # You can add other splits if needed
         },
         'annotations': []
     }
     
     # Filter the annotations to keep only those for the specified video ID and non-augmented
-    # Also add new annotations for clips found in preprocessing directory if they don't exist
     existing_frame_dirs = set()
     for annotation in annotations['annotations']:
         if video_id in annotation['frame_dir'] and "_aug" not in annotation['frame_dir']:
@@ -433,13 +440,18 @@ def filter_annotations_by_video(video_id: str, config_file: str):
     with open(annotation_file, 'wb') as f:
         pickle.dump(filtered_annotations, f)
 
-    # Create a unique filename for the text annotations based on the config file
     # Extract fold number from config file path
     fold_num = "unknown"
     if "fold" in config_file:
         fold_num = config_file.split("fold")[-1].split(".")[0]
     
-    txt_annotation_file = f'k_fold/saliency_maps/annotations_fold{fold_num}_video_{video_id}.txt'
+    # Determine where to save the text annotation file
+    if output_dir is None:
+        # Use default location
+        txt_annotation_file = f'k_fold/saliency_maps/{video_id}/annotations_fold{fold_num}.txt'
+    else:
+        # Use provided output directory
+        txt_annotation_file = output_dir / f'annotations_fold{fold_num}.txt'
     
     # Ensure the directory exists
     os.makedirs(os.path.dirname(txt_annotation_file), exist_ok=True)
@@ -451,6 +463,8 @@ def filter_annotations_by_video(video_id: str, config_file: str):
     print(f"Human-readable annotations saved to {txt_annotation_file}")
     print(f"Total non-augmented clips: {len(all_clips)}")
     print(f"Total non-augmented annotations: {len(filtered_annotations['annotations'])}")
+    
+    return filtered_annotations
 
 def write_annotations_to_txt(annotations, output_file):
     """
@@ -596,20 +610,31 @@ def process_fold_with_testing(fold: int, output_dir: Path):
         current_video_id = video_ids[0]  # Use the first video ID
         print(f"Processing video ID: {current_video_id}")
         
+        # Create a video-specific output directory
+        video_output_dir = output_dir / current_video_id
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+        
         # Filter annotations for the specific video ID
-        filter_annotations_by_video(current_video_id, config_file)
+        filter_annotations_by_video(current_video_id, config_file, video_output_dir)
         
         # Run testing for this fold to generate prediction files
-        testing_success = run_testing_for_fold(fold)
+        '''testing_success = run_testing_for_fold(fold)
         if not testing_success:
             print(f"Warning: Testing failed for fold {fold}. Saliency maps may be incomplete.")
-            return
+            return'''
         
         # Load model and all test data
         samples = load_model_and_data(fold)
+        print(f"Number of samples: {len(samples)}")
+        for i, (_, _, true_label, sample_idx, clip_name) in enumerate(samples[:5]):  # Show first 5 samples
+            print(f"Sample {i}: idx={sample_idx}, label={true_label}, clip_name={clip_name}")
+    
+        #sys.exit() 
         
-        for model, input_data, true_label, sample_idx in samples:
+        for model, input_data, true_label, sample_idx, clip_name in samples:
             print(f"\nProcessing sample {sample_idx}")
+            if clip_name:
+                print(f"Clip: {clip_name}")
             print(f"True label: {true_label}")
             
             # Compute saliency map
@@ -630,8 +655,11 @@ def process_fold_with_testing(fold: int, output_dir: Path):
                 pred_probs = torch.softmax(pred_scores, dim=1)[0]
                 pred_label = pred_probs.argmax().item()
             
-            # Create save path with video ID included in the filename
-            save_path = output_dir / f'saliency_map_fold_{fold}_video_{current_video_id}_sample_{sample_idx}.png'
+            # Create save path with clip name if available
+            if clip_name:
+                save_path = video_output_dir / f'saliency_map_{clip_name}.png'
+            else:
+                save_path = video_output_dir / f'saliency_map_fold_{fold}_sample_{sample_idx}.png'
             
             # Plot and save
             plot_saliency(
@@ -640,10 +668,16 @@ def process_fold_with_testing(fold: int, output_dir: Path):
                 true_label,
                 pred_label,
                 save_path,
-                model
+                model,
+                clip_name
             )
             
-            print(f"Generated saliency map for sample {sample_idx}")
+            if clip_name:
+                print(f"Generated saliency map for clip {clip_name}")
+            else:
+                print(f"Generated saliency map for sample {sample_idx}")
+        
+        print(f"All saliency maps for video {current_video_id} saved to {video_output_dir}")
         
     except Exception as e:
         print(f"Error processing fold {fold}: {e}")
