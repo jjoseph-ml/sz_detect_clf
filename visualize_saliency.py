@@ -17,6 +17,7 @@ from mmengine.runner import Runner
 import os
 import json
 import re
+import subprocess
 
 def find_best_model(fold_dir: Path) -> Path:
     """
@@ -543,6 +544,112 @@ def write_annotations_to_txt(annotations, output_file):
         f.write("        ]\n")
         f.write("}\n")
 
+def run_testing_for_fold(fold: int) -> bool:
+    """
+    Run the testing script for a specific fold to generate prediction files.
+    This should be called after modifying the annotation file.
+    
+    Args:
+        fold (int): The fold number to run testing for
+        
+    Returns:
+        bool: True if testing was successful, False otherwise
+    """
+    print(f"\nRunning testing for fold {fold} to generate prediction files...")
+    
+    # Path to the testing script
+    testing_script = 'run_kfold_testing.py'
+    
+    # Build command
+    cmd = [
+        'python', testing_script,
+        '--folds', str(fold)
+    ]
+    
+    try:
+        # Run the testing process
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(f"Testing completed successfully for fold {fold}")
+        print(result.stdout)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error running testing for fold {fold}: {e}")
+        print(f"stdout: {e.stdout}")
+        print(f"stderr: {e.stderr}")
+        return False
+
+def process_fold_with_testing(fold: int, output_dir: Path):
+    """
+    Process a single fold with testing:
+    1. Filter annotations for the specific video ID
+    2. Run testing to generate predictions
+    3. Generate saliency maps
+    
+    Args:
+        fold (int): The fold number to process
+        output_dir (Path): Directory to save saliency maps
+    """
+    try:
+        # Get the video ID for this fold
+        config_file = f'k_fold/stgcn/stgcn_fold{fold}.py'
+        video_ids = get_videos_in_test_split(config_file)
+        current_video_id = video_ids[0]  # Use the first video ID
+        print(f"Processing video ID: {current_video_id}")
+        
+        # Filter annotations for the specific video ID
+        filter_annotations_by_video(current_video_id, config_file)
+        
+        # Run testing for this fold to generate prediction files
+        testing_success = run_testing_for_fold(fold)
+        if not testing_success:
+            print(f"Warning: Testing failed for fold {fold}. Saliency maps may be incomplete.")
+            return
+        
+        # Load model and all test data
+        samples = load_model_and_data(fold)
+        
+        for model, input_data, true_label, sample_idx in samples:
+            print(f"\nProcessing sample {sample_idx}")
+            print(f"True label: {true_label}")
+            
+            # Compute saliency map
+            saliency_map = compute_saliency_map(model, input_data)
+            
+            # Get prediction
+            with torch.no_grad():
+                pred = model(input_data, return_loss=False)
+                if isinstance(pred, (list, tuple)):
+                    pred = pred[0]
+                pred = pred.mean(dim=2).squeeze(1)
+                pred_scores = pred.mean(dim=-1)
+                if pred_scores.size(1) > 2:
+                    binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                    binary_scores[:, 0] = pred_scores[:, 0]
+                    binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                    pred_scores = binary_scores
+                pred_probs = torch.softmax(pred_scores, dim=1)[0]
+                pred_label = pred_probs.argmax().item()
+            
+            # Create save path with video ID included in the filename
+            save_path = output_dir / f'saliency_map_fold_{fold}_video_{current_video_id}_sample_{sample_idx}.png'
+            
+            # Plot and save
+            plot_saliency(
+                input_data,
+                saliency_map,
+                true_label,
+                pred_label,
+                save_path,
+                model
+            )
+            
+            print(f"Generated saliency map for sample {sample_idx}")
+        
+    except Exception as e:
+        print(f"Error processing fold {fold}: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     # Create output directory
     output_dir = Path('k_fold/saliency_maps')
@@ -553,59 +660,7 @@ def main():
     
     for fold in range(n_folds):
         print(f"\nProcessing fold {fold}...")
-        
-        try:
-            # Get the video ID for this fold
-            config_file = f'k_fold/stgcn/stgcn_fold{fold}.py'
-            video_ids = get_videos_in_test_split(config_file)
-            current_video_id = video_ids[0]  # Use the first video ID
-            print(f"Processing video ID: {current_video_id}")
-            
-            # Load model and all test data
-            samples = load_model_and_data(fold)
-            
-            for model, input_data, true_label, sample_idx in samples:
-                print(f"\nProcessing sample {sample_idx}")
-                print(f"True label: {true_label}")
-                
-                # Compute saliency map
-                saliency_map = compute_saliency_map(model, input_data)
-                
-                # Get prediction
-                with torch.no_grad():
-                    pred = model(input_data, return_loss=False)
-                    if isinstance(pred, (list, tuple)):
-                        pred = pred[0]
-                    pred = pred.mean(dim=2).squeeze(1)
-                    pred_scores = pred.mean(dim=-1)
-                    if pred_scores.size(1) > 2:
-                        binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
-                        binary_scores[:, 0] = pred_scores[:, 0]
-                        binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
-                        pred_scores = binary_scores
-                    pred_probs = torch.softmax(pred_scores, dim=1)[0]
-                    pred_label = pred_probs.argmax().item()
-                
-                # Create save path with video ID included in the filename
-                save_path = output_dir / f'saliency_map_fold_{fold}_video_{current_video_id}_sample_{sample_idx}.png'
-                
-                # Plot and save
-                plot_saliency(
-                    input_data,
-                    saliency_map,
-                    true_label,
-                    pred_label,
-                    save_path,
-                    model
-                )
-                
-                print(f"Generated saliency map for sample {sample_idx}")
-            
-        except Exception as e:
-            print(f"Error processing fold {fold}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+        process_fold_with_testing(fold, output_dir)
 
 if __name__ == '__main__':
     main() 
