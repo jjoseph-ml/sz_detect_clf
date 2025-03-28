@@ -387,6 +387,32 @@ def calculate_motion_data(input_vis):
 
     return motion_data
 
+def calculate_motion_data_without_outliers(input_vis, outlier_percentile=95):
+    """
+    Calculate motion data with filtering of extreme movements (top 5%).
+    
+    """
+    # Calculate Euclidean distance between consecutive frames for each keypoint
+    motion_data = np.sqrt(np.sum(np.diff(input_vis, axis=0)**2, axis=-1))
+    
+    # Add a zero frame for the first frame to maintain the same number of frames
+    motion_data = np.concatenate(([np.zeros(motion_data.shape[1])], motion_data), axis=0)
+    
+    # Find the threshold value at the specified percentile
+    threshold = np.percentile(motion_data, outlier_percentile)
+    
+    # Cap values above the threshold
+    capped_motion = motion_data.copy()
+    capped_motion[capped_motion > threshold] = threshold
+    
+    # Normalize the capped motion data for visualization
+    capped_motion = (capped_motion - capped_motion.min()) / (capped_motion.max() - capped_motion.min() + 1e-8)
+    
+    # Transpose for visualization
+    capped_motion = capped_motion.T
+    
+    return capped_motion
+
 def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model=None, clip_name=None, confidence=None):
     """
     Plot the saliency map and save it to a file.
@@ -415,8 +441,8 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     if input_vis.ndim != 3:
         raise ValueError(f"Expected input shape (T, V, C), but got {input_vis.shape}")
     
-    motion_data = calculate_motion_data(input_vis)
-    
+    motion_data = calculate_motion_data_without_outliers(input_vis)
+
     # Plot motion data
     im1 = ax1.imshow(motion_data, aspect='auto', cmap='viridis')
     
