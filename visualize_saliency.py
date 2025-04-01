@@ -360,12 +360,13 @@ def compute_saliency_map(model, input_tensor):
         saliency = saliency.squeeze()  # Remove all extra dimensions
         
         # Apply slight smoothing to make the map more visually interpretable
-        saliency = torch.nn.functional.avg_pool2d(
-            saliency.unsqueeze(0).unsqueeze(0), 
-            kernel_size=3, 
-            stride=1, 
-            padding=1
-        ).squeeze()
+        # Commenting out the smoothing as requested
+        # saliency = torch.nn.functional.avg_pool2d(
+        #     saliency.unsqueeze(0).unsqueeze(0), 
+        #     kernel_size=3, 
+        #     stride=1, 
+        #     padding=1
+        # ).squeeze()
         
     return saliency.detach().cpu().numpy()
 
@@ -416,8 +417,11 @@ def calculate_motion_data_without_outliers(input_vis, outlier_percentile=95):
 def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model=None, clip_name=None, confidence=None):
     """
     Plot the saliency map and save it to a file.
+    Now includes a histogram of saliency scores by body part.
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    # Create a figure with 3 subplots (motion data, saliency map, body part histogram)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 8), 
+                                        gridspec_kw={'width_ratios': [1, 1, 0.8]})
     
     # Create main title with clip name
     clip_display = clip_name if clip_name else "Unknown Clip"
@@ -493,6 +497,50 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     # Add same keypoint group labels on y-axis
     ax2.set_yticks(group_positions)
     ax2.set_yticklabels(group_labels)
+    
+    # NEW: Calculate and plot histogram of saliency scores by body part
+    group_saliency = {}
+    for group_name, indices in keypoint_groups.items():
+        if indices:
+            # Sum saliency scores for this body part across all time frames
+            group_sum = np.sum(saliency_norm[indices, :])
+            group_saliency[group_name] = group_sum
+    
+    # Normalize the group saliency scores to percentages
+    total_saliency = sum(group_saliency.values())
+    if total_saliency > 0:  # Avoid division by zero
+        for group in group_saliency:
+            group_saliency[group] = (group_saliency[group] / total_saliency) * 100
+    
+    # Use the same order as in the keypoint_groups dictionary but reversed
+    # to match the top-to-bottom visual order in the saliency map
+    group_names = list(keypoint_groups.keys())
+    group_names.reverse()  # Reverse the order to match visual top-to-bottom
+    group_scores = [group_saliency[name] for name in group_names]
+    
+    # Use distinct colors for each body part
+    distinct_colors = {
+        'Body': '#e58e26',     
+        'Feet': '#b71540',      
+        'Face': '#0c2461',      
+        'Left Hand': '#0a3d62', 
+        'Right Hand': '#079992'
+    }
+    
+    # Create color list in the same order as the reversed groups
+    bar_colors = [distinct_colors[name] for name in group_names]
+    
+    # Plot horizontal bar chart with distinct colors
+    bars = ax3.barh(group_names, group_scores, color=bar_colors)
+    ax3.set_title('Body Part Contribution')
+    ax3.set_xlabel('Contribution (%)')
+    ax3.set_xlim(0, max(group_scores) * 1.1)  # Add some padding
+    
+    # Add percentage labels to the bars
+    for bar in bars:
+        width = bar.get_width()
+        ax3.text(width + 1, bar.get_y() + bar.get_height()/2, 
+                 f'{width:.1f}%', ha='left', va='center')
     
     # Add prediction confidence
     if confidence is None and model is not None:
