@@ -19,6 +19,7 @@ import os
 import json
 import re
 import subprocess
+import cv2
 
 def find_best_model(fold_dir: Path) -> Path:
     """
@@ -766,12 +767,175 @@ def print_prediction_file_contents(fold: int):
     
     return pred_mapping
 
+def frame_extract(video_path):
+    """Extract frames from a video file."""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+        
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(frame)
+        
+        cap.release()
+        return frames
+    except Exception as e:
+        print(f"Error extracting frames from {video_path}:")
+        import traceback
+        traceback.print_exc()
+        raise
+
+def create_saliency_video(clip_name, saliency_map, output_dir):
+    """
+    Create a video visualization with keypoints colored by saliency values.
+    
+    Args:
+        clip_name: Name of the clip
+        saliency_map: Numpy array of saliency values [T, V]
+        output_dir: Directory to save the output video
+    """
+    try:
+        # Define paths
+        video_path = f"preprocessing/video_clips/{clip_name}.mp4"
+        keypoint_path = f"preprocessing/clip_keypoints/{clip_name}.pkl"
+        output_path = output_dir / "saliency_videos"
+        output_path.mkdir(exist_ok=True, parents=True)
+        output_video = output_path / f"{clip_name}_saliency.mp4"
+        
+        # Check if files exist
+        if not os.path.exists(video_path):
+            print(f"Video file not found: {video_path}")
+            return None
+        if not os.path.exists(keypoint_path):
+            print(f"Keypoint file not found: {keypoint_path}")
+            return None
+        
+        # Extract frames from video
+        frames = frame_extract(video_path)
+        if not frames:
+            print(f"No frames extracted from {video_path}")
+            return None
+        
+        # Load keypoint data
+        with open(keypoint_path, 'rb') as f:
+            keypoint_data = pickle.load(f)
+        
+        # Debug info
+        print(f"Keypoint data type: {type(keypoint_data)}")
+        if isinstance(keypoint_data, dict):
+            print(f"Keypoint data keys: {list(keypoint_data.keys())}")
+            if 'keypoint' in keypoint_data:
+                print(f"Keypoint shape: {keypoint_data['keypoint'].shape}")
+            if 'keypoint_score' in keypoint_data:
+                print(f"Keypoint score shape: {keypoint_data['keypoint_score'].shape}")
+        
+        # Extract keypoints from the dictionary structure
+        keypoints = None
+        keypoint_scores = None
+        if isinstance(keypoint_data, dict):
+            if 'keypoint' in keypoint_data:
+                keypoints = keypoint_data['keypoint']
+                if 'keypoint_score' in keypoint_data:
+                    keypoint_scores = keypoint_data['keypoint_score']
+            elif 'keypoints' in keypoint_data:
+                keypoints = keypoint_data['keypoints']
+        
+        if keypoints is None:
+            print("Could not find keypoints in the data")
+            return None
+        
+        # Handle 4D keypoint array (person, frames, joints, coords)
+        if len(keypoints.shape) == 4:
+            # Take the first person
+            keypoints = keypoints[0]
+        
+        # Normalize saliency map for visualization
+        saliency_norm = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
+        print(f"Saliency map shape: {saliency_norm.shape}")
+        
+        # Get video dimensions
+        height, width = frames[0].shape[:2]
+        
+        # Initialize video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(str(output_video), fourcc, 30, (width, height))
+        
+        # Process each frame
+        for i, frame in enumerate(frames):
+            if i >= len(saliency_norm) or i >= len(keypoints):
+                break  # Stop if we run out of data
+                
+            # Create a copy of the frame for drawing
+            vis_frame = frame.copy()
+            
+            # Get keypoints for this frame
+            frame_keypoints = keypoints[i]
+            
+            # Draw keypoints
+            for j, kpt in enumerate(frame_keypoints):
+                if j >= saliency_norm.shape[1]:
+                    continue  # Skip if no saliency data for this keypoint
+                
+                # Get coordinates
+                x, y = int(kpt[0]), int(kpt[1])
+                
+                # Check if keypoint is valid
+                if 0 <= x < width and 0 <= y < height:
+                    # Check score if available
+                    valid_point = True
+                    if keypoint_scores is not None:
+                        valid_point = keypoint_scores[0, i, j] > 0.3
+                    
+                    if valid_point:
+                        # Get saliency value for this keypoint
+                        saliency_val = saliency_norm[i, j]
+                        
+                        # Create color based on saliency (hot colormap)
+                        if saliency_val < 0.33:
+                            # Black to red
+                            r = int(255 * (saliency_val * 3))
+                            g, b = 0, 0
+                        elif saliency_val < 0.66:
+                            # Red to yellow
+                            r = 255
+                            g = int(255 * ((saliency_val - 0.33) * 3))
+                            b = 0
+                        else:
+                            # Yellow to white
+                            r, g = 255, 255
+                            b = int(255 * ((saliency_val - 0.66) * 3))
+                        
+                        color = (b, g, r)  # OpenCV uses BGR
+                        
+                        # Draw circle with size based on saliency
+                        radius = int(3 + saliency_val * 5)  # 3-8 pixels based on saliency
+                        cv2.circle(vis_frame, (x, y), radius, color, -1)
+            
+            # Write frame to video
+            out.write(vis_frame)
+        
+        # Release video writer
+        out.release()
+        print(f"Saliency video saved to {output_video}")
+        return output_video
+        
+    except Exception as e:
+        print(f"Error creating saliency video for {clip_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 def process_fold_with_testing(fold: int, output_dir: Path):
     """
     Process a single fold with testing:
     1. Filter annotations for the specific video ID
     2. Run testing to generate predictions
     3. Generate saliency maps
+    4. Generate saliency videos
     """
     try:
         # Get the video ID for this fold
@@ -840,6 +1004,10 @@ def process_fold_with_testing(fold: int, output_dir: Path):
             # Create save path with clip name if available
             if clip_name:
                 save_path = video_output_dir / f'saliency_map_{clip_name}.png'
+                
+                # Create saliency video
+                create_saliency_video(clip_name, saliency_map, video_output_dir)
+                #sys.exit()
             else:
                 save_path = video_output_dir / f'saliency_map_fold_{fold}_sample_{sample_idx}.png'
             
