@@ -180,7 +180,7 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
     Returns:
         List of annotation file paths and total number of patients
     """
-    np.random.seed(99)  # For reproducibility
+    np.random.seed(50)  # For reproducibility
     
     # Load and organize files by patient
     patient_data = organize_by_patient(input_folder)
@@ -309,7 +309,7 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
     # At the end of the function, return total_patients along with annotation_files
     return annotation_files, total_patients
 
-def create_fold_config_files(base_config_path, output_dir, k=5, epochs=10):
+def create_fold_config_files(base_config_path, output_dir, k=5, epochs=10, clip_len=75, feats=None):
     """
     Create k configuration files for training
     
@@ -317,7 +317,9 @@ def create_fold_config_files(base_config_path, output_dir, k=5, epochs=10):
         base_config_path: Path to base configuration file
         output_dir: Base directory for output files
         k: Number of folds
-        epochs: Number of epochs for training (default: 10)
+        epochs: Number of epochs for training
+        clip_len: Number of frames to sample for each clip
+        feats: List of features to use (e.g., ['j', 'm', 'jm'])
         
     Returns:
         List of configuration file paths
@@ -325,64 +327,6 @@ def create_fold_config_files(base_config_path, output_dir, k=5, epochs=10):
     # Ensure config output directory exists
     config_output_dir = os.path.join(output_dir, 'stgcn')
     os.makedirs(config_output_dir, exist_ok=True)
-    
-    # Ensure work directories exist
-    for fold in range(k):
-        os.makedirs(os.path.join(output_dir, f"work_dirs/fold{fold}"), exist_ok=True)
-    
-    # Get the base filename without extension
-    base_filename = os.path.basename(base_config_path)
-    base_name, _ = os.path.splitext(base_filename)
-    
-    # If the base config is stgcn_joint_motion.py, we also need to handle stgcn_joint.py
-    if base_name == 'stgcn_joint_motion':
-        base_joint_path = os.path.join(os.path.dirname(base_config_path), 'stgcn_joint.py')
-        
-        # Load base joint config file
-        with open(base_joint_path, 'r') as f:
-            base_joint_content = f.read()
-        
-        # Create k joint config files
-        for fold in range(k):
-            fold_joint_content = base_joint_content
-            
-            # Update annotation file path using regex
-            fold_joint_content = re.sub(
-                r"ann_file\s*=\s*'[^']*'",
-                f"ann_file = '{output_dir}/data/skeleton/bcm_master_annotation_fold{fold}.pkl'",
-                fold_joint_content
-            )
-            
-            # Update the number of epochs in train_cfg
-            if "max_epochs=" in fold_joint_content:
-                fold_joint_content = re.sub(
-                    r'max_epochs=\d+',
-                    f'max_epochs={epochs}',
-                    fold_joint_content
-                )
-            
-            # Update optimizer configuration
-            optim_config = """
-optim_wrapper = dict(
-    optimizer=dict(
-        type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005, nesterov=True))
-"""
-            # Check if optim_wrapper already exists
-            if "optim_wrapper = dict(" not in fold_joint_content:
-                # Add it before auto_scale_lr if it exists
-                if "auto_scale_lr = dict(" in fold_joint_content:
-                    fold_joint_content = fold_joint_content.replace(
-                        "auto_scale_lr = dict(",
-                        f"{optim_config}\nauto_scale_lr = dict("
-                    )
-                else:
-                    # Otherwise add it at the end
-                    fold_joint_content += f"\n{optim_config}"
-            
-            # Write the fold-specific joint config file
-            fold_joint_path = os.path.join(config_output_dir, f'stgcn_joint.py')
-            with open(fold_joint_path, 'w') as f:
-                f.write(fold_joint_content)
     
     # Load base config file
     with open(base_config_path, 'r') as f:
@@ -394,7 +338,7 @@ optim_wrapper = dict(
     for fold in range(k):
         fold_config_content = base_config_content
         
-        # Update annotation file path using regex
+        # Update annotation file path
         fold_config_content = re.sub(
             r"ann_file\s*=\s*'[^']*'",
             f"ann_file = '{output_dir}/data/skeleton/bcm_master_annotation_fold{fold}.pkl'",
@@ -402,50 +346,30 @@ optim_wrapper = dict(
         )
         
         # Update the number of epochs in train_cfg
-        if "max_epochs=" in fold_config_content:
-            # Use regex to replace max_epochs value
+        fold_config_content = re.sub(
+            r'max_epochs=\d+',
+            f'max_epochs={epochs}',
+            fold_config_content
+        )
+        
+        # Update clip_len in all three pipelines
+        fold_config_content = re.sub(
+            r'clip_len=\d+',
+            f'clip_len={clip_len}',
+            fold_config_content
+        )
+        
+        # Update feats parameter if provided
+        if feats:
+            feats_str = str(feats).replace("'", "'")
             fold_config_content = re.sub(
-                r'max_epochs=\d+',
-                f'max_epochs={epochs}',
+                r"feats=\[.*?\]",
+                f"feats={feats_str}",
                 fold_config_content
-            )
-        else:
-            print(f"Warning: Could not find max_epochs in config file for fold {fold}")
-        
-        # Remove any existing work_dir setting
-        if "work_dir =" in fold_config_content:
-            fold_config_content = fold_config_content.replace(
-                "work_dir =", 
-                "# work_dir ="
-            )
-        
-        # Update optimizer configuration
-        optim_config = """
-optim_wrapper = dict(
-    optimizer=dict(
-        type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005, nesterov=True))
-"""
-        # Check if optim_wrapper already exists
-        if "optim_wrapper = dict(" not in fold_config_content:
-            # Add it before auto_scale_lr if it exists
-            if "auto_scale_lr = dict(" in fold_config_content:
-                fold_config_content = fold_config_content.replace(
-                    "auto_scale_lr = dict(",
-                    f"{optim_config}\nauto_scale_lr = dict("
-                )
-            else:
-                # Otherwise add it at the end
-                fold_config_content += f"\n{optim_config}"
-        
-        # Update val_evaluator to include both metrics
-        if "val_evaluator = [dict(type='AccMetric')]" in fold_config_content:
-            fold_config_content = fold_config_content.replace(
-                "val_evaluator = [dict(type='AccMetric')]",
-                "val_evaluator = [dict(type='AccMetric'), dict(type='LossMetric')]"
             )
         
         # Write the fold-specific config file
-        fold_config_path = os.path.join(config_output_dir, f'{base_name}_fold{fold}.py')
+        fold_config_path = os.path.join(config_output_dir, f'stgcnpp_fold{fold}.py')
         with open(fold_config_path, 'w') as f:
             f.write(fold_config_content)
         
@@ -455,7 +379,7 @@ optim_wrapper = dict(
     
     return config_files
 
-def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_fold', k=5, epochs=10, patients_per_test=2):
+def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_fold', k=5, epochs=10, patients_per_test=2, clip_len=75, feats=None):
     """
     Setup k-fold cross-validation 
     
@@ -464,8 +388,10 @@ def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_
         base_config_path: Path to base configuration file
         output_dir: Base directory for all k-fold related files
         k: Number of folds
-        epochs: Number of epochs for training (default: 10)
+        epochs: Number of epochs for training
         patients_per_test: Number of patients to include in each test set
+        clip_len: Number of frames to sample for each clip
+        feats: List of features to use (e.g., ['j', 'm', 'jm'])
         
     Returns:
         Lists of annotation files and config files
@@ -491,7 +417,9 @@ def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_
         base_config_path=base_config_path,
         output_dir=output_dir,
         k=k,
-        epochs=epochs
+        epochs=epochs,
+        clip_len=clip_len,
+        feats=feats
     )
     
     # Print config files for easy reference
@@ -525,13 +453,14 @@ def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_
 
 if __name__ == "__main__":
     # Configuration parameters
-    #input_folder = 'preprocessing/clip_annotations/balanced_dataset'
     input_folder = 'preprocessing/clip_keypoints'
-    base_config_path = 'stgcn/stgcnpp_joint-motion.py'
-    output_dir = 'k_fold'  # All k-fold related files will be under this directory
-    k = 3  # Number of folds
-    epochs = 15 # Number of epochs for training
-    patients_per_test = 3  # Number of patients in each test set
+    base_config_path = 'stgcn/stgcnpp_base.py'
+    output_dir = 'k_fold'
+    k = 8
+    epochs = 10
+    patients_per_test = 3
+    clip_len = 75
+    feats = ['jm']  # or whatever features you want to use
     
     # Setup k-fold cross-validation
     annotation_files, config_files = setup_k_fold_cross_validation(
@@ -540,5 +469,7 @@ if __name__ == "__main__":
         output_dir=output_dir,
         k=k,
         epochs=epochs,
-        patients_per_test=patients_per_test
+        patients_per_test=patients_per_test,
+        clip_len=clip_len,
+        feats=feats
     )
