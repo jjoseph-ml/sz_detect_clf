@@ -237,7 +237,7 @@ def load_model_and_data(fold: int) -> list:
     except FileNotFoundError as e:
         raise FileNotFoundError(f"Error for fold {fold}: {e}")
     
-    config_file = f'k_fold/stgcn/stgcn_fold{fold}.py'
+    config_file = f'k_fold/stgcn/stgcnpp_fold{fold}.py'
 
     video_ids = get_videos_in_test_split(config_file)
     print(f"Video IDs: {video_ids}")
@@ -677,30 +677,17 @@ def print_prediction_file_contents(fold: int):
     for i, pred in enumerate(predictions):
         gt_label = pred['gt_label'].item()
         
-        # Get prediction scores
-        if 'pred_score' in pred:
+        # Get prediction scores and label directly from the prediction file
+        if 'pred_score' in pred and 'pred_label' in pred:
             scores = pred['pred_score']
             if isinstance(scores, torch.Tensor):
                 scores = scores.cpu().numpy()
             
-            # Handle different score formats
-            if len(scores.shape) > 1:
-                scores = scores.mean(axis=0)  # Average over multiple clips if needed
+            # Get the predicted label from the file
+            pred_label = pred['pred_label'].item()
             
-            # Get binary prediction
-            if len(scores) > 2:
-                # Convert to binary (class 0 vs rest)
-                binary_scores = np.zeros(2)
-                binary_scores[0] = scores[0]
-                binary_scores[1] = np.sum(scores[1:])
-                scores = binary_scores
-            
-            # Apply softmax to get probabilities
-            exp_scores = np.exp(scores - np.max(scores))
-            probs = exp_scores / exp_scores.sum()
-            
-            pred_label = np.argmax(probs)
-            confidence = probs[pred_label]
+            # Get confidence directly from the scores
+            confidence = float(scores[pred_label])
         else:
             # If no scores available, use label directly
             pred_label = pred.get('pred_label', -1)
@@ -789,14 +776,18 @@ def frame_extract(video_path):
         traceback.print_exc()
         raise
 
-def create_saliency_video(clip_name, saliency_map, output_dir):
+def create_saliency_video(clip_name, saliency_map, output_dir, top_percent=10, pred_label=None, confidence=None):
     """
     Create a video visualization with keypoints colored by saliency values.
+    Only shows the top percentage of saliency values.
     
     Args:
         clip_name: Name of the clip
         saliency_map: Numpy array of saliency values [T, V]
         output_dir: Directory to save the output video
+        top_percent: Only show keypoints with saliency in the top X percent (default: 10%)
+        pred_label: Predicted label (0=non-seizure, 1=seizure)
+        confidence: Prediction confidence/probability
     """
     try:
         # Define paths
@@ -857,12 +848,46 @@ def create_saliency_video(clip_name, saliency_map, output_dir):
         saliency_norm = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
         print(f"Saliency map shape: {saliency_norm.shape}")
         
+        # Calculate threshold for top percentage
+        threshold = np.percentile(saliency_norm, 100 - top_percent)
+        print(f"Showing only top {top_percent}% of saliency values (threshold: {threshold:.4f})")
+        
         # Get video dimensions
         height, width = frames[0].shape[:2]
         
         # Initialize video writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(str(output_video), fourcc, 30, (width, height))
+        
+        # Define viridis colormap (from dark blue/purple through green to yellow)
+        # This is an approximation of the viridis colormap
+        def viridis_color(val):
+            # Map value from 0-1 to viridis colormap
+            if val < 0.25:
+                # Dark purple to blue
+                r = int(68 + val * 4 * (106 - 68))
+                g = int(1 + val * 4 * (121 - 1))
+                b = int(84 + val * 4 * (207 - 84))
+            elif val < 0.5:
+                # Blue to teal
+                normalized = (val - 0.25) * 4
+                r = int(106 + normalized * (33 - 106))
+                g = int(121 + normalized * (144 - 121))
+                b = int(207 + normalized * (141 - 207))
+            elif val < 0.75:
+                # Teal to green
+                normalized = (val - 0.5) * 4
+                r = int(33 + normalized * (93 - 33))
+                g = int(144 + normalized * (201 - 144))
+                b = int(141 + normalized * (99 - 141))
+            else:
+                # Green to yellow
+                normalized = (val - 0.75) * 4
+                r = int(93 + normalized * (253 - 93))
+                g = int(201 + normalized * (231 - 201))
+                b = int(99 + normalized * (37 - 99))
+            
+            return (b, g, r)  # OpenCV uses BGR
         
         # Process each frame
         for i, frame in enumerate(frames):
@@ -872,13 +897,44 @@ def create_saliency_video(clip_name, saliency_map, output_dir):
             # Create a copy of the frame for drawing
             vis_frame = frame.copy()
             
+            # Add a legend for saliency values
+            legend_height = 30
+            legend_width = 200
+            legend_x = width - legend_width - 10
+            legend_y = 10
+            
+            # Create gradient for legend (viridis colormap)
+            for x in range(legend_width):
+                # Use a simple 0-1 range for the legend, not the actual saliency values
+                saliency_val = x / legend_width
+                color = viridis_color(saliency_val)
+                cv2.line(vis_frame, (legend_x + x, legend_y), (legend_x + x, legend_y + legend_height), color, 1)
+            
+            # Add text labels
+            cv2.putText(vis_frame, "Low", (legend_x, legend_y + legend_height + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viridis_color(0), 1)  # Dark purple
+            cv2.putText(vis_frame, "High", (legend_x + legend_width - 30, legend_y + legend_height + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viridis_color(1), 1)  # Yellow
+            cv2.putText(vis_frame, f"Top {top_percent}% Saliency", (legend_x + legend_width//2 - 60, legend_y + legend_height + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
             # Get keypoints for this frame
             frame_keypoints = keypoints[i]
             
-            # Draw keypoints
+            # Get saliency values for this frame
+            frame_saliency = saliency_norm[i]
+            
+            # Draw keypoints (only those above threshold)
             for j, kpt in enumerate(frame_keypoints):
                 if j >= saliency_norm.shape[1]:
                     continue  # Skip if no saliency data for this keypoint
+                
+                # Get saliency value for this keypoint
+                saliency_val = frame_saliency[j]
+                
+                # Skip if below threshold
+                if saliency_val < threshold:
+                    continue
                 
                 # Get coordinates
                 x, y = int(kpt[0]), int(kpt[1])
@@ -891,29 +947,32 @@ def create_saliency_video(clip_name, saliency_map, output_dir):
                         valid_point = keypoint_scores[0, i, j] > 0.3
                     
                     if valid_point:
-                        # Get saliency value for this keypoint
-                        saliency_val = saliency_norm[i, j]
-                        
-                        # Create color based on saliency (hot colormap)
-                        if saliency_val < 0.33:
-                            # Black to red
-                            r = int(255 * (saliency_val * 3))
-                            g, b = 0, 0
-                        elif saliency_val < 0.66:
-                            # Red to yellow
-                            r = 255
-                            g = int(255 * ((saliency_val - 0.33) * 3))
-                            b = 0
-                        else:
-                            # Yellow to white
-                            r, g = 255, 255
-                            b = int(255 * ((saliency_val - 0.66) * 3))
-                        
-                        color = (b, g, r)  # OpenCV uses BGR
+                        # Use viridis colormap
+                        color = viridis_color(saliency_val)
                         
                         # Draw circle with size based on saliency
-                        radius = int(3 + saliency_val * 5)  # 3-8 pixels based on saliency
+                        base_radius = 5
+                        scale_factor = 10
+                        radius = int(base_radius + saliency_val * scale_factor)
+                        
+                        # Draw filled circle
                         cv2.circle(vis_frame, (x, y), radius, color, -1)
+            
+            # Add prediction probability text
+            if pred_label is not None and confidence is not None:
+                pred_text = f"Prediction: {'Seizure' if pred_label == 1 else 'Non-Seizure'}"
+                prob_text = f"Probability: {confidence:.2%}"
+                
+                # Create a semi-transparent background for text
+                text_bg = np.zeros((60, 300, 3), dtype=np.uint8)
+                cv2.rectangle(vis_frame, (10, 10), (310, 70), (0, 0, 0), -1)
+                cv2.rectangle(vis_frame, (10, 10), (310, 70), (255, 255, 255), 1)
+                
+                # Add text with white color
+                cv2.putText(vis_frame, pred_text, (20, 35), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(vis_frame, prob_text, (20, 60), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # Write frame to video
             out.write(vis_frame)
@@ -939,10 +998,13 @@ def process_fold_with_testing(fold: int, output_dir: Path):
     """
     try:
         # Get the video ID for this fold
-        config_file = f'k_fold/stgcn/stgcn_fold{fold}.py'
+        config_file = f'k_fold/stgcn/stgcnpp_fold{fold}.py'
         video_ids = get_videos_in_test_split(config_file)
         current_video_id = video_ids[0]  # Use the first video ID
         print(f"Processing video ID: {current_video_id}")
+        
+        # Dictionary to store saliency data for the current video
+        video_clips = {}
         
         # Create a video-specific output directory
         video_output_dir = output_dir / current_video_id
@@ -1005,9 +1067,9 @@ def process_fold_with_testing(fold: int, output_dir: Path):
             if clip_name:
                 save_path = video_output_dir / f'saliency_map_{clip_name}.png'
                 
-                # Create saliency video
-                create_saliency_video(clip_name, saliency_map, video_output_dir)
-                #sys.exit()
+                # Create saliency video with prediction probability
+                create_saliency_video(clip_name, saliency_map, video_output_dir, 
+                                     pred_label=pred_label, confidence=confidence)
             else:
                 save_path = video_output_dir / f'saliency_map_fold_{fold}_sample_{sample_idx}.png'
             
@@ -1024,13 +1086,352 @@ def process_fold_with_testing(fold: int, output_dir: Path):
             )
             
             print(f"Generated saliency map for {'clip ' + clip_name if clip_name else 'sample ' + str(sample_idx)}")
+            
+            # Store saliency data in dictionary
+            video_clips[clip_name] = {
+                'saliency_map': saliency_map,
+                'true_label': true_label,
+                'pred_label': pred_label,
+                'confidence': confidence
+            }
         
         print(f"All saliency maps for video {current_video_id} saved to {video_output_dir}")
+        
+        # After processing all clips for this fold, create whole video visualization
+        if video_clips:
+            print(f"\nCreating whole video visualization for fold {fold}, video {current_video_id}")
+            create_whole_video_visualization(fold, current_video_id, video_clips, output_dir)
         
     except Exception as e:
         print(f"Error processing fold {fold}: {e}")
         import traceback
         traceback.print_exc()
+
+def create_whole_video_visualization(fold, video_id, video_clips, output_dir):
+    """
+    Create a visualization for the entire video using saliency data from all clips.
+    
+    Args:
+        fold: The fold number
+        video_id: The video ID
+        video_clips: Dictionary of clip data {clip_name: {saliency_map, true_label, pred_label, confidence}}
+        output_dir: Base output directory
+    """
+    # Load visibility data
+    visibility_data = load_visibility_data()
+    
+    # Create output directory
+    video_output_dir = output_dir / video_id
+    video_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create directory for whole video visualization
+    whole_video_dir = video_output_dir / "whole_video"
+    whole_video_dir.mkdir(exist_ok=True)
+    
+    # Get all clip names and sort them by segment number
+    clip_names = list(video_clips.keys())
+    
+    # Create mapping of clip names to their temporal position
+    clip_timeline = {}
+    for clip in clip_names:
+        # Extract segment number from clip name (e.g., "05463487_79519000_Seg_1")
+        try:
+            seg_part = clip.split('_Seg_')[1]
+            if '_' in seg_part:
+                seg_num = int(seg_part.split('_')[0])
+            else:
+                seg_num = int(seg_part)
+            clip_timeline[clip] = seg_num
+        except (IndexError, ValueError):
+            print(f"Error parsing segment number for {clip}")
+            clip_timeline[clip] = 999999
+    
+    # Sort clips by their temporal position
+    sorted_clips = sorted(clip_names, key=lambda x: clip_timeline.get(x, 999999))
+    print(f"Sorted {len(sorted_clips)} clips for whole video visualization")
+    
+    # Find global min and max saliency values across all clips
+    global_min = float('inf')
+    global_max = float('-inf')
+    
+    for clip_name in sorted_clips:
+        clip_data = video_clips[clip_name]
+        saliency_map = clip_data['saliency_map']
+        
+        current_min = saliency_map.min()
+        current_max = saliency_map.max()
+        
+        if current_min < global_min:
+            global_min = current_min
+        
+        if current_max > global_max:
+            global_max = current_max
+    
+    print(f"Global saliency range: {global_min} to {global_max}")
+    
+    # Create a whole video visualization
+    output_video = whole_video_dir / f"{video_id}_whole_video_saliency.mp4"
+    
+    # Initialize video writer (will set dimensions after loading first frame)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    video_writer = None
+    
+    # Calculate global threshold for top percentage (10%)
+    top_percent = 50
+    all_saliency_values = []
+    
+    for clip_name in sorted_clips:
+        clip_data = video_clips[clip_name]
+        saliency_map = clip_data['saliency_map']
+        # Flatten the saliency map and add to list
+        all_saliency_values.extend(saliency_map.flatten())
+    
+    # Convert to numpy array for percentile calculation
+    all_saliency_values = np.array(all_saliency_values)
+    
+    # Normalize all values using global min/max
+    normalized_values = (all_saliency_values - global_min) / (global_max - global_min + 1e-8)
+    
+    # Calculate threshold for top percentage
+    global_threshold = np.percentile(normalized_values, 100 - top_percent)
+    print(f"Global threshold for top {top_percent}%: {global_threshold:.4f}")
+    
+    # Process each clip in temporal order
+    for clip_idx, clip_name in enumerate(sorted_clips):
+        # Get low visibility percentage if available
+        low_vis_percentage = visibility_data.get(clip_name, None)
+        
+        # Get saliency map and normalize using global min/max
+        saliency_map = video_clips[clip_name]['saliency_map']
+        saliency_norm = (saliency_map - global_min) / (global_max - global_min + 1e-8)
+        
+        # NEW: Renormalize the visible saliency values to better distribute colors
+        # First create a mask of values above threshold
+        visible_mask = saliency_norm >= global_threshold
+        if visible_mask.any():
+            # Get min and max of visible values
+            visible_min = saliency_norm[visible_mask].min()
+            visible_max = saliency_norm[visible_mask].max()
+            
+            # Create a new normalized array for visualization (only affects color, not visibility)
+            saliency_viz = saliency_norm.copy()
+            # Renormalize the visible values to span the full 0-1 range
+            if visible_max > visible_min:  # Avoid division by zero
+                saliency_viz[visible_mask] = (saliency_norm[visible_mask] - visible_min) / (visible_max - visible_min)
+        else:
+            saliency_viz = saliency_norm
+        
+        # Get prediction info
+        true_label = video_clips[clip_name]['true_label']
+        pred_label = video_clips[clip_name]['pred_label']
+        confidence = video_clips[clip_name]['confidence']
+        
+        # Load video frames and keypoints
+        video_path = f"preprocessing/video_clips/{clip_name}.mp4"
+        keypoint_path = f"preprocessing/clip_keypoints/{clip_name}.pkl"
+        
+        if not os.path.exists(video_path) or not os.path.exists(keypoint_path):
+            print(f"Warning: Missing video or keypoint file for clip {clip_name}")
+            continue
+        
+        # Extract frames from video
+        frames = frame_extract(video_path)
+        if not frames:
+            print(f"No frames extracted from {video_path}")
+            continue
+        
+        # Load keypoint data
+        with open(keypoint_path, 'rb') as f:
+            keypoint_data = pickle.load(f)
+        
+        # Extract keypoints
+        keypoints = None
+        if isinstance(keypoint_data, dict):
+            if 'keypoint' in keypoint_data:
+                keypoints = keypoint_data['keypoint']
+            elif 'keypoints' in keypoint_data:
+                keypoints = keypoint_data['keypoints']
+        
+        if keypoints is None:
+            print(f"Could not find keypoints in data for clip {clip_name}")
+            continue
+        
+        # Handle 4D keypoint array (person, frames, joints, coords)
+        if len(keypoints.shape) == 4:
+            keypoints = keypoints[0]  # Take first person
+        
+        # Initialize video writer if not already done
+        if video_writer is None:
+            height, width = frames[0].shape[:2]
+            video_writer = cv2.VideoWriter(str(output_video), fourcc, 30, (width, height))
+        
+        # Process each frame in this clip
+        for i, frame in enumerate(frames):
+            if i >= len(saliency_viz) or i >= len(keypoints):
+                break
+            
+            # Create a copy of the frame for drawing
+            vis_frame = frame.copy()
+            
+            # Add a legend for saliency values
+            legend_height = 30
+            legend_width = 200
+            legend_x = width - legend_width - 10
+            legend_y = 10
+            
+            # Create gradient for legend (viridis colormap)
+            for x in range(legend_width):
+                # Use a simple 0-1 range for the legend, not the actual saliency values
+                saliency_val = x / legend_width
+                color = viridis_color(saliency_val)
+                cv2.line(vis_frame, (legend_x + x, legend_y), (legend_x + x, legend_y + legend_height), color, 1)
+            
+            # Add text labels
+            cv2.putText(vis_frame, "Low", (legend_x, legend_y + legend_height + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viridis_color(0), 1)
+            cv2.putText(vis_frame, "High", (legend_x + legend_width - 30, legend_y + legend_height + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, viridis_color(1), 1)
+            cv2.putText(vis_frame, f"Top {top_percent}% Saliency", (legend_x + legend_width//2 - 60, legend_y + legend_height + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Add visibility information if available
+            if low_vis_percentage is not None:
+                # Add a visibility legend
+                vis_legend_y = legend_y + legend_height + 40
+                cv2.rectangle(vis_frame, (legend_x, vis_legend_y), (legend_x + legend_width, vis_legend_y + 20), (0, 0, 0), -1)
+                cv2.rectangle(vis_frame, (legend_x, vis_legend_y), (legend_x + legend_width, vis_legend_y + 20), (255, 255, 255), 1)
+                
+                # Add text
+                vis_text = f"Low Visibility: {low_vis_percentage:.2f}%"
+                cv2.putText(vis_frame, vis_text, (legend_x + 10, vis_legend_y + 15), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Get keypoints for this frame
+            frame_keypoints = keypoints[i]
+            
+            # Get saliency values for this frame
+            frame_saliency = saliency_viz[i]
+            
+            # Draw keypoints (only those above global threshold)
+            for j, kpt in enumerate(frame_keypoints):
+                if j >= saliency_viz.shape[1]:
+                    continue
+                
+                # Get saliency value for this keypoint
+                saliency_val = frame_saliency[j]
+                
+                # Skip if below global threshold
+                if saliency_val < global_threshold:
+                    continue
+                
+                # Get coordinates
+                x, y = int(kpt[0]), int(kpt[1])
+                
+                # Check if keypoint is valid
+                if 0 <= x < width and 0 <= y < height:
+                    # Use viridis colormap with the renormalized value for better color distribution
+                    color = viridis_color(saliency_viz[i, j])
+                    
+                    # Draw circle with size based on original saliency (not renormalized)
+                    base_radius = 5
+                    scale_factor = 10
+                    radius = int(base_radius + saliency_val * scale_factor)
+                    
+                    # Draw filled circle
+                    cv2.circle(vis_frame, (x, y), radius, color, -1)
+            
+            # Add clip information
+            clip_info = f"Clip: {clip_name} ({clip_idx+1}/{len(sorted_clips)})"
+            cv2.putText(vis_frame, clip_info, (10, height - 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Add prediction information
+            pred_text = f"Prediction: {'Seizure' if pred_label == 1 else 'Non-Seizure'}"
+            gt_text = f"Ground Truth: {'Seizure' if true_label == 1 else 'Non-Seizure'}"
+            prob_text = f"Confidence: {confidence:.2%}"
+            
+            # Create a smaller background for text
+            cv2.rectangle(vis_frame, (10, 10), (150, 50), (0, 0, 0), -1)
+            cv2.rectangle(vis_frame, (10, 10), (150, 50), (255, 255, 255), 1)
+            
+            # Add text with white color at 1/3 the original size
+            cv2.putText(vis_frame, pred_text, (15, 22), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.23, (255, 255, 255), 1)
+            cv2.putText(vis_frame, gt_text, (15, 35), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.23, (255, 255, 255), 1)
+            cv2.putText(vis_frame, prob_text, (15, 48), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.23, (255, 255, 255), 1)
+            
+            # Write frame to video
+            video_writer.write(vis_frame)
+        
+        print(f"Processed clip {clip_idx+1}/{len(sorted_clips)}: {clip_name}")
+    
+    # Release video writer
+    if video_writer is not None:
+        video_writer.release()
+        print(f"Whole video saliency visualization saved to {output_video}")
+    else:
+        print("Error: No frames were processed, video writer was not initialized")
+
+def viridis_color(val):
+    """Map value from 0-1 to viridis colormap (BGR for OpenCV)"""
+    # Map value from 0-1 to viridis colormap
+    if val < 0.25:
+        # Dark purple to blue
+        r = int(68 + val * 4 * (106 - 68))
+        g = int(1 + val * 4 * (121 - 1))
+        b = int(84 + val * 4 * (207 - 84))
+    elif val < 0.5:
+        # Blue to teal
+        normalized = (val - 0.25) * 4
+        r = int(106 + normalized * (33 - 106))
+        g = int(121 + normalized * (144 - 121))
+        b = int(207 + normalized * (141 - 207))
+    elif val < 0.75:
+        # Teal to green
+        normalized = (val - 0.5) * 4
+        r = int(33 + normalized * (93 - 33))
+        g = int(144 + normalized * (201 - 144))
+        b = int(141 + normalized * (99 - 141))
+    else:
+        # Green to yellow
+        normalized = (val - 0.75) * 4
+        r = int(93 + normalized * (253 - 93))
+        g = int(201 + normalized * (231 - 201))
+        b = int(99 + normalized * (37 - 99))
+    
+    return (b, g, r)  # OpenCV uses BGR
+
+def load_visibility_data():
+    """
+    Load visibility data from the CSV file.
+    Returns a dictionary mapping clip names to their low visibility percentage.
+    """
+    visibility_data = {}
+    csv_path = "preprocessing/visibility_analysis_clips.csv"
+    
+    if not os.path.exists(csv_path):
+        print(f"Warning: Visibility data file {csv_path} not found")
+        return visibility_data
+    
+    try:
+        with open(csv_path, 'r') as f:
+            # Skip header
+            next(f)
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) >= 7:
+                    # Extract clip name without .pkl extension
+                    clip_name = parts[0].replace('.pkl', '')
+                    low_vis_percentage = float(parts[6])
+                    visibility_data[clip_name] = low_vis_percentage
+        
+        print(f"Loaded visibility data for {len(visibility_data)} clips")
+        return visibility_data
+    except Exception as e:
+        print(f"Error loading visibility data: {e}")
+        return {}
 
 def main():
     # Create output directory
@@ -1038,11 +1439,26 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Process each fold
-    n_folds = 3
+    n_folds = 5
     
     for fold in range(n_folds):
         print(f"\nProcessing fold {fold}...")
+        
+        # Dictionary to store saliency data for the current video
+        video_clips = {}
+        
+        # Get the video ID for this fold
+        config_file = f'k_fold/stgcn/stgcnpp_fold{fold}.py'
+        video_ids = get_videos_in_test_split(config_file)
+        current_video_id = video_ids[0]  # Use the first video ID
+        
+        # Process fold as before...
         process_fold_with_testing(fold, output_dir)
+        
+        # After processing all clips for this fold, create whole video visualization
+        if video_clips:
+            print(f"\nCreating whole video visualization for fold {fold}, video {current_video_id}")
+            create_whole_video_visualization(fold, current_video_id, video_clips, output_dir)
 
 if __name__ == '__main__':
     main() 
