@@ -1,6 +1,9 @@
 # Ignore everything
 *
 
+# But allow directories (so Git can look inside them)
+!*/
+
 # Allow only .py files
 !*.py
 
