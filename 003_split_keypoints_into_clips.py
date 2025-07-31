@@ -6,6 +6,7 @@ import pickle
 import pandas as pd
 from tqdm import tqdm
 import traceback
+import argparse
 #import warnings
 #import logging
 #import sys
@@ -94,6 +95,40 @@ def determine_clip_label(start_frame, end_frame, seizure_range, fps=30.0):
     
     return 1 if is_seizure else 0
 
+def determine_clip_label_with_partial(start_frame, end_frame, seizure_range, fps=30.0):
+    """
+    Determine clip label with support for partial seizure detection.
+    
+    Args:
+        start_frame: Start frame index of the clip
+        end_frame: End frame index of the clip
+        seizure_range: List containing seizure start and end times in seconds
+        fps: Frames per second (default: 30.0)
+        
+    Returns:
+        0: No seizure activity
+        1: Entire clip is during seizure
+        9: Partial seizure (clip partially overlaps with seizure period)
+    """
+    # Calculate clip start and end times in seconds
+    clip_start_time = start_frame / fps
+    clip_end_time = end_frame / fps
+    
+    # Get seizure start and end times in seconds from annotation
+    seizure_start_time = seizure_range[0]
+    seizure_end_time = seizure_range[1]
+    
+    # Check if clip is entirely outside seizure period
+    if clip_end_time <= seizure_start_time or clip_start_time >= seizure_end_time:
+        return 0  # No seizure activity
+    
+    # Check if clip is entirely within seizure period
+    if clip_start_time >= seizure_start_time and clip_end_time <= seizure_end_time:
+        return 1  # Entire clip is during seizure
+    
+    # If not entirely outside and not entirely inside, it must be partially overlapping
+    return 9  # Partial seizure
+
 def cleanup_output_directory(output_dir):
     """
     Clean up the output directory by removing all existing files.
@@ -112,7 +147,7 @@ def cleanup_output_directory(output_dir):
         os.makedirs(output_dir, exist_ok=True)
         print(f"Created new directory {output_dir}")
 
-def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frames_per_clip=100, clip_annotations_file=None):
+def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frames_per_clip=100, clip_annotations_file=None, use_partial_labels=False):
     """
     Process all keypoint files, split into raw clips without filtering, and save with labels.
     This function preserves the original keypoint data structure.
@@ -123,6 +158,7 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
         annotation_file: Path to video annotation file
         frames_per_clip: Number of frames per clip
         clip_annotations_file: Path to save clip annotations
+        use_partial_labels: If True, use label 9 for partial seizure clips
     """
     # If clip_annotations_file is not specified, use default path
     if clip_annotations_file is None:
@@ -149,6 +185,7 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
     total_clips = 0
     seizure_clips = 0
     non_seizure_clips = 0
+    partial_seizure_clips = 0
     failed_videos = []
     
     # Create a list to store clip annotations (clip_path, label)
@@ -193,6 +230,12 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
                 # Extract frames for this clip - keep raw data structure
                 clip_pose_results = pose_results[start_frame:end_frame]
                 
+                # Determine label based on the option
+                if use_partial_labels:
+                    label = determine_clip_label_with_partial(start_frame, end_frame, seizure_range)
+                else:
+                    label = determine_clip_label(start_frame, end_frame, seizure_range)
+                
                 # Create a dictionary to store clip information
                 clip_data = {
                     'pose_results': clip_pose_results,
@@ -202,7 +245,7 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
                     'clip_idx': clip_idx,
                     'start_frame': start_frame,
                     'end_frame': end_frame,
-                    'label': determine_clip_label(start_frame, end_frame, seizure_range)
+                    'label': label
                 }
                 
                 # Set clip name
@@ -217,17 +260,19 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
                 
                 # Update statistics
                 total_clips += 1
-                if clip_data['label'] == 1:
+                if label == 1:
                     seizure_clips += 1
-                else:
+                elif label == 0:
                     non_seizure_clips += 1
+                elif label == 9:
+                    partial_seizure_clips += 1
                 
                 # Save clip
                 with open(output_path, 'wb') as f:
                     pickle.dump(clip_data, f)
                 
                 # Add to clip annotations list
-                clip_annotations.append((output_path, clip_data['label']))
+                clip_annotations.append((output_path, label))
             
         except Exception as e:
             print(f"Failed to process raw clips for {keypoint_file}: {str(e)}")
@@ -264,6 +309,8 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
     print(f"Total raw clips generated: {total_clips}")
     print(f"Seizure clips: {seizure_clips}")
     print(f"Non-seizure clips: {non_seizure_clips}")
+    if use_partial_labels:
+        print(f"Partial seizure clips (label 9): {partial_seizure_clips}")
     print(f"Raw clip annotations saved to: {clip_annotations_file}")
     
     # Print failed videos
@@ -277,7 +324,7 @@ def process_raw_keypoint_clips(keypoints_dir, output_dir, annotation_file, frame
             for video, error in failed_videos:
                 f.write(f"{video}: {error}\n")
 
-def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip=100, clip_annotations_file=None):
+def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per_clip=100, clip_annotations_file=None, use_partial_labels=False):
     """Process all keypoint files, split into clips, and save with labels."""
     
     # If clip_annotations_file is not specified, use default path
@@ -305,6 +352,7 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
     total_clips = 0
     seizure_clips = 0
     non_seizure_clips = 0
+    partial_seizure_clips = 0
     failed_videos = []
     
     # Create a list to store clip annotations (clip_path, label)
@@ -384,8 +432,11 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
                 anno['keypoint'] = keypoints
                 anno['keypoint_score'] = scores
                 
-                # Determine if this clip contains seizure
-                anno['label'] = determine_clip_label(start_frame, end_frame, seizure_range)
+                # Determine label based on the option
+                if use_partial_labels:
+                    anno['label'] = determine_clip_label_with_partial(start_frame, end_frame, seizure_range)
+                else:
+                    anno['label'] = determine_clip_label(start_frame, end_frame, seizure_range)
                 
                 # Generate output path
                 output_path = os.path.join(output_dir, f"{anno['frame_dir']}.pkl")
@@ -394,8 +445,10 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
                 total_clips += 1
                 if anno['label'] == 1:
                     seizure_clips += 1
-                else:
+                elif anno['label'] == 0:
                     non_seizure_clips += 1
+                elif anno['label'] == 9:
+                    partial_seizure_clips += 1
                 
                 # Save clip
                 with open(output_path, 'wb') as f:
@@ -439,6 +492,8 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
     print(f"Total clips generated: {total_clips}")
     print(f"Seizure clips: {seizure_clips}")
     print(f"Non-seizure clips: {non_seizure_clips}")
+    if use_partial_labels:
+        print(f"Partial seizure clips (label 9): {partial_seizure_clips}")
     print(f"Clip annotations saved to: {clip_annotations_file}")
     
     # Print failed videos
@@ -453,6 +508,13 @@ def process_all_keypoints(keypoints_dir, output_dir, annotation_file, frames_per
                 f.write(f"{video}: {error}\n")
 
 if __name__ == '__main__':
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Process keypoint files and split into clips with labels')
+    parser.add_argument('--use-partial-labels', action='store_true',
+                        help='Use label 9 for clips with partial seizure activity')
+    
+    args = parser.parse_args()
+    
     # Configuration
     config = {
         'keypoints_dir': 'preprocessing/video_keypoints',
@@ -460,7 +522,8 @@ if __name__ == '__main__':
         'raw_output_dir': 'preprocessing/raw_keypoint_clips',  # New directory for raw clips
         'annotation_file': 'preprocessing/video_annotations/video_annotations.txt',
         'frames_per_clip': 90,
-        'clip_annotations_file': 'preprocessing/video_annotations/clip_annotations.txt'
+        'clip_annotations_file': 'preprocessing/video_annotations/clip_annotations.txt',
+        'use_partial_labels': args.use_partial_labels
     }
     
     print("Starting keypoints processing with the following configuration:")
@@ -470,6 +533,7 @@ if __name__ == '__main__':
     print(f"- Annotation file: {config['annotation_file']}")
     print(f"- Frames per clip: {config['frames_per_clip']}")
     print(f"- Clip annotations file: {config['clip_annotations_file']}")
+    print(f"- Use partial labels: {config['use_partial_labels']}")
     
     # Ask user which processing to run
     print("\nSelect processing option:")
@@ -487,7 +551,8 @@ if __name__ == '__main__':
             config['output_dir'],
             config['annotation_file'],
             config['frames_per_clip'],
-            config['clip_annotations_file']
+            config['clip_annotations_file'],
+            config['use_partial_labels']
         )
     
     if choice == '2' or choice == '3':
@@ -498,7 +563,8 @@ if __name__ == '__main__':
             config['raw_output_dir'],
             config['annotation_file'],
             config['frames_per_clip'],
-            config['clip_annotations_file']
+            config['clip_annotations_file'],
+            config['use_partial_labels']
         )
     
     print("\nProcessing complete. Check the output directories for generated clips.")

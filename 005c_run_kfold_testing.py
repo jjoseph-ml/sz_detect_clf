@@ -46,9 +46,26 @@ def main():
     parser = argparse.ArgumentParser(description='Run k-fold cross-validation testing')
     parser.add_argument('--folds', type=str, default='all', 
                       help='Comma-separated list of fold indices to test, or "all"')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                      help='Path to specific checkpoint file to use for all folds (overrides automatic checkpoint finding)')
     parser.add_argument('--dry-run', action='store_true', 
                       help='Print commands without executing them')
     args, test_args = parser.parse_known_args()
+    
+    # Validate checkpoint file if provided
+    specific_checkpoint = None
+    if args.checkpoint:
+        checkpoint_path = Path(args.checkpoint)
+        if not checkpoint_path.exists():
+            print(f"Error: Specified checkpoint file '{checkpoint_path}' does not exist")
+            return 1
+        if not checkpoint_path.is_file():
+            print(f"Error: Specified checkpoint path '{checkpoint_path}' is not a file")
+            return 1
+        specific_checkpoint = checkpoint_path
+        print(f"Using specific checkpoint for all folds: {specific_checkpoint}")
+    else:
+        print("No specific checkpoint provided - will use best checkpoint for each fold")
     
     # Use the direct path to test.py in mmaction2
     test_script = os.path.join(mmaction2_path, 'tools', 'test.py')
@@ -61,8 +78,16 @@ def main():
     # Create test results directory
     test_results_dir.mkdir(parents=True, exist_ok=True)
     
-    # Find all fold config files
-    config_files = sorted([str(f) for f in config_dir.glob("stgcn_fold*.py")])
+    # Find all fold config files with natural sorting
+    def natural_sort_key(filename):
+        """Extract fold number for natural sorting"""
+        if 'fold' in filename.name:
+            fold_part = filename.name.split('fold')[1].split('.')[0]
+            return int(fold_part)
+        return 0
+    
+    config_files = sorted([f for f in config_dir.glob("stgcnpp_fold*.py")], key=natural_sort_key)
+    config_files = [str(f) for f in config_files]
     
     if not config_files:
         print(f"Error: No fold configuration files found in {config_dir}")
@@ -112,12 +137,16 @@ def main():
         config_file = config_files[fold_idx]
         work_dir = work_dir_base / f"fold{fold_idx}"
         
-        try:
-            checkpoint_file = find_best_checkpoint(work_dir)
-        except FileNotFoundError as e:
-            print(f"Error: {e}")
-            print(f"Skipping fold {fold_idx}")
-            continue
+        # Use specific checkpoint if provided, otherwise find best checkpoint for this fold
+        if specific_checkpoint:
+            checkpoint_file = specific_checkpoint
+        else:
+            try:
+                checkpoint_file = find_best_checkpoint(work_dir)
+            except FileNotFoundError as e:
+                print(f"Error: {e}")
+                print(f"Skipping fold {fold_idx}")
+                continue
         
         # Set up output file for this fold
         output_file = test_results_dir / f"fold{fold_idx}_predictions.pkl"

@@ -160,8 +160,15 @@ def main():
         print(f"Error: Predictions directory not found: {predictions_dir}")
         return 1
     
-    # Find all prediction files
-    prediction_files = sorted(predictions_dir.glob('fold*_predictions.pkl'))
+    # Find all prediction files with natural sorting
+    def natural_sort_key(filename):
+        """Extract fold number for natural sorting"""
+        if 'fold' in filename.name:
+            fold_part = filename.name.split('fold')[1].split('_')[0]
+            return int(fold_part)
+        return 0
+    
+    prediction_files = sorted(predictions_dir.glob('fold*_predictions.pkl'), key=natural_sort_key)
     
     if not prediction_files:
         print(f"Error: No prediction files found in {predictions_dir}")

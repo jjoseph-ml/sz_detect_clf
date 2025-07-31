@@ -32,11 +32,11 @@ def run_script(script_name: str) -> bool:
 def main():
     # List of scripts to run in sequence
     scripts = [
-        'run_kfold_training.py',
-        'run_kfold_train_analysis.py',
-        'run_kfold_testing.py',
-        'run_fold_prediction_analysis.py',
-        'generate_kfold_report.py'
+        #'005A_run_kfold_training.py',
+        '005B_run_kfold_train_analysis.py',
+        '005C_run_kfold_testing.py',
+        '005D_run_fold_prediction_analysis.py',
+        '005E_generate_kfold_report.py'
     ]
     
     # Start time
@@ -51,8 +51,8 @@ def main():
         
         # Add delay between scripts (except after the last one)
         if i < len(scripts) - 1:
-            print("\nWaiting 5 seconds before next script...")
-            time.sleep(60)
+            print("\nWaiting 20 seconds before next script...")
+            time.sleep(20)
     
     # End time
     end_time = datetime.now()

@@ -1,3 +1,8 @@
+# This script is used to setup the k-fold cross-validation for the model.
+# It creates the fold annotation files and the fold configuration files.
+# The fold annotation files are used to train the model.
+# The fold configuration files are used to configure the model.
+# It balances the clips and videos in the split.
 import os
 import pickle
 import numpy as np
@@ -8,25 +13,82 @@ import shutil
 from pathlib import Path
 import re
 
-def organize_by_patient(input_folder):
+def organize_by_patient(annotation_file_path, input_folder):
     """
-    Organize data by patient ID from pickle files
+    Organize data by patient ID from pickle files, using annotation file to filter
     
     Args:
+        annotation_file_path: Path to clip_annotations.txt file
         input_folder: Folder containing pickle files with frame data
         
     Returns:
         Dictionary mapping patient IDs to their data
     """
-    print("Loading and organizing files by patient...")
+    print("Loading and organizing files by patient from annotation file...")
     
-    # Read all pickle files
-    pkl_files = [f for f in os.listdir(input_folder) if f.endswith('.pkl')]
+    # First, read annotation file to get valid files and labels
+    valid_files = {}  # filename -> label mapping
+    excluded_files = {}  # filename -> label mapping for excluded files
+    
+    with open(annotation_file_path, 'r') as f:
+        lines = f.readlines()
+    
+    print(f"Found {len(lines)} entries in annotation file")
+    
+    for line in tqdm(lines, desc="Processing annotation entries"):
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Parse the line: "preprocessing/clip_keypoints\patient_video_segment.pkl label"
+        parts = line.split()
+        if len(parts) != 2:
+            print(f"Warning: Skipping malformed line: {line}")
+            continue
+            
+        file_path, label_str = parts
+        
+        # Extract filename from path
+        filename = os.path.basename(file_path)
+        
+        try:
+            label = int(label_str)
+            
+            # Filter out labels that are not 0 or 1
+            if label not in [0, 1]:
+                excluded_files[filename] = label
+                continue
+                
+            valid_files[filename] = label
+            
+        except ValueError:
+            print(f"Warning: Invalid label '{label_str}' in line: {line}")
+    
+    print(f"Found {len(valid_files)} valid files with labels 0 or 1")
+    print(f"Excluded {len(excluded_files)} files with invalid labels:")
+    
+    # Show statistics of excluded labels
+    excluded_label_counts = {}
+    for filename, label in excluded_files.items():
+        if label not in excluded_label_counts:
+            excluded_label_counts[label] = []
+        excluded_label_counts[label].append(filename)
+    
+    for label, filenames in excluded_label_counts.items():
+        print(f"  Label {label}: {len(filenames)} files")
+        if len(filenames) <= 5:  # Show all filenames if 5 or fewer
+            for filename in filenames:
+                print(f"    - {filename}")
+        else:  # Show first few examples
+            for filename in filenames[:3]:
+                print(f"    - {filename}")
+            print(f"    ... and {len(filenames) - 3} more")
     
     # Create patient-based grouping
     patient_data = defaultdict(lambda: {'frame_dirs': [], 'labels': [], 'files': [], 'videos': set()})
     
-    for filename in tqdm(pkl_files, desc="Processing files"):
+    # Now read the actual pickle files for valid files only
+    for filename, label in tqdm(valid_files.items(), desc="Loading pickle files"):
         patient_id = filename.split('_')[0]
         video_id = filename.split('_')[1]  # Get the video ID part (e.g., 7941EC00)
         
@@ -36,7 +98,7 @@ def organize_by_patient(input_folder):
                 
                 # Store data grouped by patient
                 patient_data[patient_id]['frame_dirs'].append(pkl_data['frame_dir'])
-                patient_data[patient_id]['labels'].append(pkl_data['label'])
+                patient_data[patient_id]['labels'].append(label)  # Use label from annotation file
                 patient_data[patient_id]['files'].append(filename)
                 patient_data[patient_id]['videos'].add(video_id)
         except Exception as e:
@@ -44,24 +106,79 @@ def organize_by_patient(input_folder):
     
     return patient_data
 
-def load_all_annotations(input_folder):
+def load_all_annotations(annotation_file_path, input_folder):
     """
-    Load all annotation data from pickle files
+    Load all annotation data from pickle files, using annotation file to filter
     
     Args:
+        annotation_file_path: Path to clip_annotations.txt file
         input_folder: Folder containing pickle files
         
     Returns:
         List of all annotations
     """
-    pkl_files = [f for f in os.listdir(input_folder) if f.endswith('.pkl')]
+    # First, read annotation file to get valid files and labels
+    valid_files = {}  # filename -> label mapping
+    excluded_files = {}  # filename -> label mapping for excluded files
+    
+    with open(annotation_file_path, 'r') as f:
+        lines = f.readlines()
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+            
+        file_path, label_str = parts
+        filename = os.path.basename(file_path)
+        
+        try:
+            label = int(label_str)
+            
+            # Filter out labels that are not 0 or 1
+            if label not in [0, 1]:
+                excluded_files[filename] = label
+                continue
+                
+            valid_files[filename] = label
+            
+        except ValueError:
+            continue
+    
+    print(f"Loading annotations: {len(valid_files)} valid files, {len(excluded_files)} excluded")
+    
+    # Show statistics of excluded labels if any
+    if excluded_files:
+        excluded_label_counts = {}
+        for filename, label in excluded_files.items():
+            if label not in excluded_label_counts:
+                excluded_label_counts[label] = 0
+            excluded_label_counts[label] += 1
+        
+        print("Excluded label distribution:")
+        for label, count in excluded_label_counts.items():
+            print(f"  Label {label}: {count} files")
+    
+    # Now load the actual pickle files for valid files only
     all_annotations = []
     
-    for filename in tqdm(pkl_files, desc="Loading annotations"):
+    for filename, label in tqdm(valid_files.items(), desc="Loading annotations"):
         try:
             with open(os.path.join(input_folder, filename), 'rb') as f:
                 pkl_data = pickle.load(f)
-                all_annotations.append(pkl_data)
+                
+                # Create annotation entry with full pickle data
+                annotation = {
+                    'frame_dir': pkl_data['frame_dir'],
+                    'label': label,  # Use label from annotation file
+                    # Include any other data from the pickle file
+                    **{k: v for k, v in pkl_data.items() if k not in ['frame_dir', 'label']}
+                }
+                all_annotations.append(annotation)
         except Exception as e:
             print(f"Error loading {filename}: {e}")
     
@@ -166,11 +283,12 @@ def count_labels(split_dirs, annotations):
         
     return np.bincount(labels, minlength=2)
 
-def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1.0, patients_per_test=2):
+def create_fold_annotation_files(annotation_file_path, input_folder, output_dir, k=5, minority_ratio=1.0, patients_per_test=2):
     """
     Create k-fold annotation files with stratified patient splits
     
     Args:
+        annotation_file_path: Path to clip_annotations.txt file
         input_folder: Folder containing pickle files
         output_dir: Base directory for output files
         k: Number of folds
@@ -183,7 +301,7 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
     np.random.seed(50)  # For reproducibility
     
     # Load and organize files by patient
-    patient_data = organize_by_patient(input_folder)
+    patient_data = organize_by_patient(annotation_file_path, input_folder)
     patient_ids = list(patient_data.keys())
     
     print(f"\nFound {len(patient_ids)} patients: {', '.join(sorted(patient_ids))}")
@@ -216,7 +334,7 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
                        f"and validation ({patients_per_val}) sets")
     
     # Load all annotations once
-    all_annotations = load_all_annotations(input_folder)
+    all_annotations = load_all_annotations(annotation_file_path, input_folder)
     
     # Create output directory if it doesn't exist
     annotation_dir = os.path.join(output_dir, 'data/skeleton')
@@ -295,14 +413,17 @@ def create_fold_annotation_files(input_folder, output_dir, k=5, minority_ratio=1
             
         print(f"\nFold {fold} annotation file created: {output_file}")
         print(f"  Training patients ({len(train_patients)}): {', '.join(sorted(train_patients))}")
+        print(f"    Videos: {', '.join(sorted(train_videos))}")
         print(f"    Normal clips: {train_labels[0]}, Seizure clips: {train_labels[1]}")
         print(f"    Ratio (normal:seizure): {train_labels[0]/max(train_labels[1], 1):.2f}:1")
         
         print(f"  Validation patients ({len(val_patients)}): {', '.join(sorted(val_patients))}")
+        print(f"    Videos: {', '.join(sorted(val_videos))}")
         print(f"    Normal clips: {val_labels[0]}, Seizure clips: {val_labels[1]}")
         print(f"    Ratio (normal:seizure): {val_labels[0]/max(val_labels[1], 1):.2f}:1")
         
         print(f"  Testing patients ({len(test_patients)}): {', '.join(sorted(test_patients))}")
+        print(f"    Videos: {', '.join(sorted(test_videos))}")
         print(f"    Normal clips: {test_labels[0]}, Seizure clips: {test_labels[1]}")
         print(f"    Ratio (normal:seizure): {test_labels[0]/max(test_labels[1], 1):.2f}:1")
         
@@ -379,11 +500,12 @@ def create_fold_config_files(base_config_path, output_dir, k=5, epochs=10, clip_
     
     return config_files
 
-def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_fold', k=5, epochs=10, patients_per_test=2, clip_len=75, feats=None):
+def setup_k_fold_cross_validation(annotation_file_path, input_folder, base_config_path, output_dir='k_fold', k=5, epochs=10, patients_per_test=2, clip_len=75, feats=None):
     """
     Setup k-fold cross-validation 
     
     Args:
+        annotation_file_path: Path to clip_annotations.txt file
         input_folder: Folder containing pickle files
         base_config_path: Path to base configuration file
         output_dir: Base directory for all k-fold related files
@@ -404,6 +526,7 @@ def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_
     # Step 1: Create fold annotation files
     print("\nCreating fold annotation files...")
     annotation_files, total_patients = create_fold_annotation_files(
+        annotation_file_path=annotation_file_path,
         input_folder=input_folder,
         output_dir=output_dir,
         k=k,
@@ -453,17 +576,19 @@ def setup_k_fold_cross_validation(input_folder, base_config_path, output_dir='k_
 
 if __name__ == "__main__":
     # Configuration parameters
+    annotation_file_path = 'preprocessing/video_annotations/clip_annotations.txt'
     input_folder = 'preprocessing/clip_keypoints'
     base_config_path = 'stgcn/stgcnpp_base.py'
     output_dir = 'k_fold'
-    k = 8
-    epochs = 10
-    patients_per_test = 3
-    clip_len = 75
+    k = 5
+    epochs = 15
+    patients_per_test = 5
+    clip_len = 90
     feats = ['jm']  # or whatever features you want to use
     
     # Setup k-fold cross-validation
     annotation_files, config_files = setup_k_fold_cross_validation(
+        annotation_file_path=annotation_file_path,
         input_folder=input_folder,
         base_config_path=base_config_path,
         output_dir=output_dir,

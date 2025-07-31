@@ -61,8 +61,32 @@ def get_frame_width(video_path):
         print(traceback.format_exc())
         raise
 
-def get_init_boxes(frame_length, video_name, video_path, bbox_df):
-    """Create a list of initial bounding boxes using the correct bbox for the video."""
+def get_video_info(video_path):
+    """Get video information including frame count, width, height, and fps."""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+        
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        cap.release()
+        return {
+            'frame_count': frame_count,
+            'width': width,
+            'height': height,
+            'fps': fps
+        }
+    except Exception as e:
+        print(f"Error getting video info for {video_path}:")
+        print(traceback.format_exc())
+        raise
+
+def get_init_bbox(video_name, video_path, bbox_df):
+    """Get the initial bounding box for a video."""
     try:
         # Check if this is an augmented video
         is_augmented = '_aug' in video_name
@@ -91,254 +115,199 @@ def get_init_boxes(frame_length, video_name, video_path, bbox_df):
             frame_width = get_frame_width(video_path)
             bbox[0] = get_flipped_bbox(bbox[0], frame_width)
             
-        # Create the list with frame length copies
-        det_results = [bbox.copy() for _ in range(frame_length)]
-        return det_results
+        return bbox
     except Exception as e:
-        print(f"Error in get_init_boxes for {video_name}:")
+        print(f"Error in get_init_bbox for {video_name}:")
         print(traceback.format_exc())
         raise
 
-def frame_extract(video_path, out_dir):
-    """Extract frames from a video file."""
+def process_single_frame(model, frame, det, device):
+    """Process a single frame for pose estimation."""
     try:
-        start_time = time.time()
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {video_path}")
+        from mmpose.apis import inference_topdown
+        from mmpose.structures import merge_data_samples
         
-        # Get total frame count for progress bar
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        # Run inference directly on the frame
+        pose_data_samples = inference_topdown(model, frame, det[..., :4], bbox_format='xyxy')
+        pose_data_sample = merge_data_samples(pose_data_samples)
+        pose_data_sample.dataset_meta = model.dataset_meta
         
-        print(f"Extracting frames from video ({total_frames} frames, {fps:.2f} fps)")
+        # Make fake pred_instances if needed
+        if not hasattr(pose_data_sample, 'pred_instances'):
+            num_keypoints = model.dataset_meta['num_keypoints']
+            pred_instances_data = dict(
+                keypoints=np.empty(shape=(0, num_keypoints, 2)),
+                keypoints_scores=np.empty(shape=(0, 17), dtype=np.float32),
+                bboxes=np.empty(shape=(0, 4), dtype=np.float32),
+                bbox_scores=np.empty(shape=(0), dtype=np.float32))
+            pose_data_sample.pred_instances = InstanceData(**pred_instances_data)
         
-        frames = []
-        frame_idx = 0
+        # Extract pose data
+        poses = pose_data_sample.pred_instances.to_dict()
         
-        # Create progress bar for frame extraction
-        with tqdm(total=total_frames, desc="Extracting frames") as pbar:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                frames.append(frame)
-                frame_idx += 1
-                pbar.update(1)
-        
-        cap.release()
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"Frame extraction completed in {elapsed_time:.2f} seconds ({elapsed_time/total_frames:.4f} sec/frame)")
-        return frames
+        return poses, pose_data_sample
     except Exception as e:
-        print(f"Error extracting frames from {video_path}:")
+        print(f"Error in process_single_frame:")
         print(traceback.format_exc())
         raise
 
-def pose_inference(pose_config, pose_checkpoint, frames, det_results, device):
-    """Run pose inference on frames."""
+def pose_extraction_frame_by_frame(video_path, pose_config, pose_checkpoint, device, bbox_df, output_viz_dir=None):
+    """Extract poses from a video frame by frame without storing all frames in memory."""
     try:
-        from mmaction.apis import pose_inference as mmaction_pose_inference
-        from mmpose.apis import inference_topdown, init_model
-        from mmpose.structures import PoseDataSample, merge_data_samples
+        from mmpose.apis import init_model
         
-        # Create a progress bar wrapper for pose inference
-        print(f"Running pose inference on {len(frames)} frames")
+        total_start_time = time.time()
+        print(f"\n{'='*20} Processing {osp.basename(video_path)} {'='*20}")
+        
+        # Get video information
+        video_info = get_video_info(video_path)
+        frame_count = video_info['frame_count']
+        fps = video_info['fps']
+        print(f"Video info: {frame_count} frames, {fps:.2f} fps")
+        
+        # Get bounding box for the video
+        video_name = osp.basename(video_path)
+        bbox_start_time = time.time()
+        bbox = get_init_bbox(video_name, video_path, bbox_df)
+        bbox_end_time = time.time()
+        bbox_time = bbox_end_time - bbox_start_time
+        print(f"Bounding box preparation completed in {bbox_time:.2f} seconds")
         
         # Initialize the pose model
         model_init_start = time.time()
-        if isinstance(pose_config, nn.Module):
-            model = pose_config
-        else:
-            model = init_model(pose_config, pose_checkpoint, device)
+        model = init_model(pose_config, pose_checkpoint, device)
         model_init_end = time.time()
         model_init_time = model_init_end - model_init_start
         print(f"Model initialization completed in {model_init_time:.2f} seconds")
         
+        # Open the video
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+        
+        # Initialize visualization if needed
+        visualizer = None
+        out = None
+        if output_viz_dir is not None:
+            from mmengine.registry import VISUALIZERS
+            import mmcv
+            
+            output_filename = osp.splitext(osp.basename(video_path))[0]
+            pose_config_obj = mmengine.Config.fromfile(pose_config)
+            visualizer = VISUALIZERS.build(pose_config_obj.visualizer)
+            
+            # Get dimensions from the first frame
+            ret, first_frame = cap.read()
+            if not ret:
+                raise ValueError(f"Could not read first frame from {video_path}")
+            
+            height, width = first_frame.shape[:2]
+            
+            # Initialize video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out_filename = os.path.join(output_viz_dir, f"{output_filename}_viz.mp4")
+            out = cv2.VideoWriter(out_filename, fourcc, fps, (width, height))
+            
+            # Reset video to start
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        # Process frames one by one
         results = []
-        data_samples = []
-        
-        # Create progress bar for pose inference
-        inference_start = time.time()
         frame_times = []
+        frame_idx = 0
         
-        with tqdm(total=len(frames), desc="Pose inference") as pbar:
-            for i, (frame, det) in enumerate(zip(frames, det_results)):
+        # Create progress bar for frame processing
+        with tqdm(total=frame_count, desc="Processing frames") as pbar:
+            while True:
                 # Time each frame
                 frame_start = time.time()
                 
-                # Run inference directly on the frame
-                pose_data_samples = inference_topdown(model, frame, det[..., :4], bbox_format='xyxy')
-                pose_data_sample = merge_data_samples(pose_data_samples)
-                pose_data_sample.dataset_meta = model.dataset_meta
+                # Read frame
+                ret, frame = cap.read()
+                if not ret:
+                    break
                 
-                # Make fake pred_instances if needed
-                if not hasattr(pose_data_sample, 'pred_instances'):
-                    num_keypoints = model.dataset_meta['num_keypoints']
-                    pred_instances_data = dict(
-                        keypoints=np.empty(shape=(0, num_keypoints, 2)),
-                        keypoints_scores=np.empty(shape=(0, 17), dtype=np.float32),
-                        bboxes=np.empty(shape=(0, 4), dtype=np.float32),
-                        bbox_scores=np.empty(shape=(0), dtype=np.float32))
-                    pose_data_sample.pred_instances = InstanceData(**pred_instances_data)
+                # Process frame
+                det = bbox.copy()  # Use the same bbox for all frames
+                poses, pose_data_sample = process_single_frame(model, frame, det, device)
                 
-                poses = pose_data_sample.pred_instances.to_dict()
+                # Store results
                 results.append(poses)
-                data_samples.append(pose_data_sample)
+                
+                # Create visualization if needed
+                if visualizer is not None and out is not None:
+                    # Set dataset meta if this is the first frame
+                    if frame_idx == 0:
+                        visualizer.set_dataset_meta(pose_data_sample.dataset_meta)
+                    
+                    # Create visualization
+                    f = mmcv.imconvert(frame, 'bgr', 'rgb')
+                    visualizer.add_datasample(
+                        'result',
+                        f,
+                        data_sample=pose_data_sample,
+                        draw_gt=False,
+                        draw_heatmap=False,
+                        draw_bbox=True,
+                        show=False,
+                        wait_time=0,
+                        out_file=None,
+                        kpt_thr=0.3)
+                    vis_frame = visualizer.get_image()
+                    
+                    # Convert RGB to BGR for OpenCV
+                    vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_RGB2BGR)
+                    
+                    # Write frame
+                    out.write(vis_frame)
                 
                 # Record frame time
                 frame_end = time.time()
                 frame_time = frame_end - frame_start
                 frame_times.append(frame_time)
                 
+                # Save debug info for frame 100
+                if frame_idx == 100:
+                    output_filename = osp.splitext(osp.basename(video_path))[0]
+                    debug_dir = os.path.dirname(output_viz_dir) if output_viz_dir else "."
+                    os.makedirs(debug_dir, exist_ok=True)
+                    debug_file = os.path.join(debug_dir, f"{output_filename}_frame100_raw.txt")
+                    with open(debug_file, 'w') as f:
+                        f.write(str(poses))
+                        print(f"Raw frame 100 data saved to {debug_file}")
+                
+                frame_idx += 1
                 pbar.update(1)
         
-        inference_end = time.time()
-        inference_time = inference_end - inference_start
-        avg_frame_time = sum(frame_times) / len(frame_times)
-        max_frame_time = max(frame_times)
-        min_frame_time = min(frame_times)
+        # Release resources
+        cap.release()
+        if out is not None:
+            out.release()
+            print(f'Visualization saved to {os.path.join(output_viz_dir, f"{output_filename}_viz.mp4")}')
         
-        print(f"Pose inference completed in {inference_time:.2f} seconds ({inference_time/len(frames):.4f} sec/frame)")
-        print(f"Average frame processing time: {avg_frame_time:.4f} seconds")
-        print(f"Min/Max frame times: {min_frame_time:.4f}/{max_frame_time:.4f} seconds")
-        
-        return results, data_samples
-    except Exception as e:
-        print(f"Error in pose inference:")
-        print(traceback.format_exc())
-        raise
-
-def create_visualization(frames, data_samples, output_filename, output_viz_dir, pose_config):
-    """
-    Create visualization video with pose keypoints.
-    
-    Args:
-        frames: List of video frames
-        data_samples: Pose data samples
-        output_filename: Base filename for output
-        output_viz_dir: Directory to save visualization
-        pose_config: Path to pose config file
-    """
-    try:
-        from mmengine.registry import VISUALIZERS
-        from mmengine.utils import track_iter_progress
-        import mmcv
-        
-        print("Generating visualization...")
-        pose_config_obj = mmengine.Config.fromfile(pose_config)
-        visualizer = VISUALIZERS.build(pose_config_obj.visualizer)
-        visualizer.set_dataset_meta(data_samples[0].dataset_meta)
-        
-        # Get dimensions from the first frame
-        height, width = frames[0].shape[:2]
-        
-        # Initialize video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out_filename = os.path.join(output_viz_dir, f"{output_filename}_viz.mp4")
-        out = cv2.VideoWriter(out_filename, fourcc, 24, (width, height))
-        
-        # Create visualization with progress bar
-        with tqdm(total=len(frames), desc="Creating visualization") as pbar:
-            for d, f in zip(data_samples, frames):
-                f = mmcv.imconvert(f, 'bgr', 'rgb')
-                visualizer.add_datasample(
-                    'result',
-                    f,
-                    data_sample=d,
-                    draw_gt=False,
-                    draw_heatmap=False,
-                    draw_bbox=True,
-                    show=False,
-                    wait_time=0,
-                    out_file=None,
-                    kpt_thr=0.3)
-                vis_frame = visualizer.get_image()
-                
-                # Convert RGB to BGR for OpenCV
-                vis_frame = cv2.cvtColor(vis_frame, cv2.COLOR_RGB2BGR)
-                
-                # Write frame
-                out.write(vis_frame)
-                pbar.update(1)
-        
-        # Release video writer
-        out.release()
-        print(f'Visualization saved to {out_filename}')
-        return out_filename
-    except Exception as e:
-        print(f"Error in create_visualization:")
-        print(traceback.format_exc())
-        raise
-
-def pose_extraction(video_path, pose_config, pose_checkpoint, device, bbox_df, output_viz_dir=None):
-    """Extract poses from a video."""
-    try:
-        total_start_time = time.time()
-        print(f"\n{'='*20} Processing {osp.basename(video_path)} {'='*20}")
-        
-        # Extract frames directly without writing to disk
-        frame_start_time = time.time()
-        frames = frame_extract(video_path, out_dir=None)
-        frame_end_time = time.time()
-        frame_extraction_time = frame_end_time - frame_start_time
-        
-        # Get bounding boxes using the video name and path (for frame width)
-        bbox_start_time = time.time()
-        video_name = osp.basename(video_path)
-        det_results = get_init_boxes(len(frames), video_name, video_path, bbox_df)
-        bbox_end_time = time.time()
-        bbox_time = bbox_end_time - bbox_start_time
-        print(f"Bounding box preparation completed in {bbox_time:.2f} seconds")
-        
-        # Get pose results
-        inference_start_time = time.time()
-        pose_results, data_samples = pose_inference(pose_config, pose_checkpoint,
-                                                  frames, det_results, device)
-        inference_end_time = time.time()
-        inference_time = inference_end_time - inference_start_time
-        
-        if pose_results is None:
-            raise ValueError("Pose inference returned None")
-        
-        # Print the 100th frame pose results to a text file for debugging
-        debug_start_time = time.time()
-        if len(pose_results) > 100:
-            output_filename = osp.splitext(osp.basename(video_path))[0]
-            debug_dir = os.path.dirname(output_viz_dir) if output_viz_dir else "."
-            os.makedirs(debug_dir, exist_ok=True)
-            debug_file = os.path.join(debug_dir, f"{output_filename}_frame100_raw.txt")
-            with open(debug_file, 'w') as f:
-                # Get the 100th frame pose result and write it directly to the file
-                frame_100 = pose_results[100]
-                f.write(str(frame_100))
-                print(f"Raw frame 100 data saved to {debug_file}")
-        debug_end_time = time.time()
-        debug_time = debug_end_time - debug_start_time
-        
-        # Generate visualization if output directory is provided
-        if output_viz_dir is not None:
-            output_filename = osp.splitext(osp.basename(video_path))[0]
-            #create_visualization(frames, data_samples, output_filename, output_viz_dir, pose_config)
-        
+        # Calculate statistics
         total_end_time = time.time()
         total_time = total_end_time - total_start_time
         
+        if frame_times:
+            avg_frame_time = sum(frame_times) / len(frame_times)
+            max_frame_time = max(frame_times)
+            min_frame_time = min(frame_times)
+            
+            print(f"Frame processing statistics:")
+            print(f"  Average frame processing time: {avg_frame_time:.4f} seconds")
+            print(f"  Min/Max frame times: {min_frame_time:.4f}/{max_frame_time:.4f} seconds")
+        
         print(f"Time breakdown for {osp.basename(video_path)}:")
-        print(f"  Frame extraction: {frame_extraction_time:.2f} seconds ({frame_extraction_time/total_time*100:.1f}%)")
         print(f"  Bounding box prep: {bbox_time:.2f} seconds ({bbox_time/total_time*100:.1f}%)")
-        print(f"  Pose inference: {inference_time:.2f} seconds ({inference_time/total_time*100:.1f}%)")
-        print(f"  Debug output: {debug_time:.2f} seconds ({debug_time/total_time*100:.1f}%)")
+        print(f"  Model initialization: {model_init_time:.2f} seconds ({model_init_time/total_time*100:.1f}%)")
         print(f"  Total processing time: {total_time:.2f} seconds")
         print(f"{'='*20} Completed {osp.basename(video_path)} {'='*20}\n")
         
-        # Return only the raw pose_results
-        return pose_results
+        return results
         
     except Exception as e:
-        print(f"Error in pose_extraction for {video_path}:")
+        print(f"Error in pose_extraction_frame_by_frame for {video_path}:")
         print(traceback.format_exc())
         raise
 
@@ -415,7 +384,7 @@ def process_all_videos(annotation_file, output_dir, pose_config, pose_checkpoint
                 try:
                     print(f"Processing video: {video_path}")
                     extraction_start = time.time()
-                    pose_results = pose_extraction(video_path, pose_config, pose_checkpoint, 
+                    pose_results = pose_extraction_frame_by_frame(video_path, pose_config, pose_checkpoint, 
                                          device, bbox_df, output_viz_dir)
                     extraction_end = time.time()
                     extraction_time = extraction_end - extraction_start
@@ -453,7 +422,7 @@ def process_all_videos(annotation_file, output_dir, pose_config, pose_checkpoint
                 try:
                     print(f"Processing augmented video: {aug_video_path}")
                     extraction_start = time.time()
-                    pose_results = pose_extraction(aug_video_path, pose_config, pose_checkpoint, 
+                    pose_results = pose_extraction_frame_by_frame(aug_video_path, pose_config, pose_checkpoint, 
                                          device, bbox_df, output_viz_dir)
                     extraction_end = time.time()
                     extraction_time = extraction_end - extraction_start

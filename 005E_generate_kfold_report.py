@@ -147,9 +147,9 @@ def create_html_report(training_dir: Path, test_results_file: Path, output_file:
     # Extract training configuration from the STGCN configuration files
     # First try fold-specific config, then fall back to base configs
     config_file_paths = [
-        Path('k_fold/stgcn/stgcn_fold0.py'),  # Try fold-specific config first
-        Path('k_fold/stgcn/stgcn_joint.py'),  # Then try base configs
-        Path('k_fold/stgcn/stgcn_joint_motion.py')
+        Path('k_fold/stgcn/stgcnpp_fold0.py'),  # Try fold-specific config first
+        #Path('k_fold/stgcn/stgcn_joint.py'),  # Then try base configs
+        #Path('k_fold/stgcn/stgcn_joint_motion.py')
     ]
     
     training_config = {}
@@ -336,7 +336,7 @@ def create_html_report(training_dir: Path, test_results_file: Path, output_file:
     html_content += "</tr>"
     
     # Add rows for each fold
-    for fold_idx in range(len(test_metrics)):
+    for i, fold_idx in enumerate(test_metrics.index):
         html_content += f"""
                 <tr>
                     <td>{fold_idx}</td>
@@ -369,7 +369,7 @@ def create_html_report(training_dir: Path, test_results_file: Path, output_file:
     """
     
     # Add individual fold sections with updated image paths
-    for fold_idx in range(len(test_metrics)):
+    for fold_idx in test_metrics.index:
         html_content += f"""
             <div class="fold-section">
                 <h3>Fold {fold_idx}</h3>

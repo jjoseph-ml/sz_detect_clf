@@ -43,7 +43,7 @@ def check_gpu_availability() -> List[int]:
     return gpu_indices
 
 def cleanup_checkpoints(work_dir_base: Path, folds_to_run: List[int]) -> None:
-    """Clean up .pth checkpoint files from previous runs for specified folds.
+    """Clean up .pth checkpoint files and last_checkpoint file from previous runs for specified folds.
     
     Args:
         work_dir_base: Base directory containing fold subdirectories
@@ -64,9 +64,19 @@ def cleanup_checkpoints(work_dir_base: Path, folds_to_run: List[int]) -> None:
                 print(f"Deleted checkpoint: {checkpoint}")
             except Exception as e:
                 print(f"Error deleting {checkpoint}: {e}")
+        
+        # Also delete the last_checkpoint file if it exists
+        last_checkpoint_file = fold_dir / "last_checkpoint"
+        if last_checkpoint_file.exists():
+            try:
+                last_checkpoint_file.unlink()
+                total_deleted += 1
+                print(f"Deleted last_checkpoint: {last_checkpoint_file}")
+            except Exception as e:
+                print(f"Error deleting {last_checkpoint_file}: {e}")
     
     if total_deleted > 0:
-        print(f"\nCleanup complete. Deleted {total_deleted} checkpoint files.")
+        print(f"\nCleanup complete. Deleted {total_deleted} files.")
     else:
         print("\nNo checkpoint files found to clean up.")
 
@@ -76,8 +86,8 @@ def main():
                       help='Comma-separated list of fold indices to run, or "all"')
     parser.add_argument('--dry-run', action='store_true', 
                       help='Print commands without executing them')
-    parser.add_argument('--no-cleanup', action='store_true',
-                      help='Skip cleanup of previous checkpoint files')
+    parser.add_argument('--cleanup', action='store_true',
+                      help='Clean up previous checkpoint files (default: no cleanup)')
     args, train_args = parser.parse_known_args()
     
     # Use the direct path to train.py in mmaction2
@@ -87,8 +97,16 @@ def main():
     config_dir = Path('k_fold/stgcn')
     work_dir_base = Path('k_fold/work_dirs')
     
-    # Find all fold config files
-    config_files = sorted([str(f) for f in config_dir.glob("stgcn_fold*.py")])
+    # Find all fold config files with natural sorting
+    def natural_sort_key(filename):
+        """Extract fold number for natural sorting"""
+        if 'fold' in filename.name:
+            fold_part = filename.name.split('fold')[1].split('.')[0]
+            return int(fold_part)
+        return 0
+    
+    config_files = sorted([f for f in config_dir.glob("stgcnpp_fold*.py")], key=natural_sort_key)
+    config_files = [str(f) for f in config_files]
     
     if not config_files:
         print(f"Error: No fold configuration files found in {config_dir}")
@@ -130,8 +148,8 @@ def main():
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, available_gpus))
         os.environ['LOCAL_RANK'] = '0'  # Set local rank for single GPU training
     
-    # Clean up previous checkpoints unless --no-cleanup is specified
-    if not args.no_cleanup and not args.dry_run:
+    # Clean up previous checkpoints unless --cleanup is specified
+    if args.cleanup and not args.dry_run:
         print("\nCleaning up previous checkpoint files...")
         cleanup_checkpoints(work_dir_base, folds_to_run)
     
@@ -157,8 +175,8 @@ def main():
             'python',
             train_script,
             config_file,
-            '--work-dir', str(work_dir)
-           # '--resume','k_fold/work_dirs/best_pretrained_model.pth'
+            '--work-dir', str(work_dir),
+            '--resume'
         ] + train_args
         
         print(f"Running command: {' '.join(cmd)}")
