@@ -500,6 +500,154 @@ def create_fold_config_files(base_config_path, output_dir, k=5, epochs=10, clip_
     
     return config_files
 
+def setup_initial_directories(output_dir):
+    """
+    Create initial output directories
+    
+    Args:
+        output_dir: Base directory for all k-fold related files
+        
+    Returns:
+        None
+    """
+    print(f"Preparing {output_dir}/ directory structure...")
+    os.makedirs(output_dir, exist_ok=True)
+
+def create_configuration_files(base_config_path, output_dir, k, epochs, clip_len, feats):
+    """
+    Create fold configuration files (lightweight task)
+    
+    Args:
+        base_config_path: Path to base configuration file
+        output_dir: Base directory for output files
+        k: Number of folds
+        epochs: Number of epochs for training
+        clip_len: Number of frames to sample for each clip
+        feats: List of features to use
+        
+    Returns:
+        List of configuration file paths
+    """
+    print("\nCreating fold configuration files...")
+    config_files = create_fold_config_files(
+        base_config_path=base_config_path,
+        output_dir=output_dir,
+        k=k,
+        epochs=epochs,
+        clip_len=clip_len,
+        feats=feats
+    )
+    
+    print("\nConfiguration files created:")
+    for file in config_files:
+        print(f"  {file}")
+    
+    return config_files
+
+def get_user_confirmation(k, patients_per_test, input_folder, annotation_file_path):
+    """
+    Ask user to continue before heavy annotation file creation
+    
+    Args:
+        k: Number of folds
+        patients_per_test: Number of patients to include in each test set
+        input_folder: Folder containing pickle files
+        annotation_file_path: Path to clip_annotations.txt file
+        
+    Returns:
+        bool: True if user wants to continue, False otherwise
+    """
+    print(f"\nConfiguration files created successfully!")
+    print(f"About to start creating annotation files (this may take a while)...")
+    print(f"Parameters:")
+    print(f"  - Number of folds: {k}")
+    print(f"  - Patients per test set: {patients_per_test}")
+    print(f"  - Input folder: {input_folder}")
+    print(f"  - Annotation file: {annotation_file_path}")
+    
+    user_input = input("\nContinue with annotation file creation? (y/n): ").strip().lower()
+    if user_input not in ['y', 'yes']:
+        print("Setup cancelled by user.")
+        return False
+    
+    return True
+
+def create_annotation_files(annotation_file_path, input_folder, output_dir, k, patients_per_test):
+    """
+    Create fold annotation files (heavy task)
+    
+    Args:
+        annotation_file_path: Path to clip_annotations.txt file
+        input_folder: Folder containing pickle files
+        output_dir: Base directory for output files
+        k: Number of folds
+        patients_per_test: Number of patients to include in each test set
+        
+    Returns:
+        Tuple of (annotation_files, total_patients)
+    """
+    print("\nCreating fold annotation files...")
+    annotation_files, total_patients = create_fold_annotation_files(
+        annotation_file_path=annotation_file_path,
+        input_folder=input_folder,
+        output_dir=output_dir,
+        k=k,
+        minority_ratio=1.0,
+        patients_per_test=patients_per_test
+    )
+    
+    return annotation_files, total_patients
+
+def print_created_files(annotation_files, config_files):
+    """
+    Print all created files for easy reference
+    
+    Args:
+        annotation_files: List of annotation file paths
+        config_files: List of configuration file paths
+        
+    Returns:
+        None
+    """
+    print("\nCreated the following files:")
+    print("Annotation files:")
+    for file in annotation_files:
+        print(f"  {file}")
+    
+    print("\nConfiguration files:")
+    for file in config_files:
+        print(f"  {file}")
+
+def print_setup_summary(output_dir, k, patients_per_test, total_patients):
+    """
+    Print setup completion summary
+    
+    Args:
+        output_dir: Base directory for all k-fold related files
+        k: Number of folds
+        patients_per_test: Number of patients to include in each test set
+        total_patients: Total number of patients
+        
+    Returns:
+        None
+    """
+    print(f"\nSetup complete! All files are organized under the {output_dir}/ directory.")
+    print("You can now use run_kfold_training.py to train the models:")
+    
+    # Add summary section
+    print("\nK-FOLD SUMMARY")
+    print("==============")
+    print(f"Total number of folds: {k}")
+    print(f"Patients per set in each fold:")
+    print(f"  - Test set: {patients_per_test} patients")
+    print(f"  - Validation set: {patients_per_test} patients")
+    print(f"  - Training set: {total_patients - (2 * patients_per_test)} patients")
+    print(f"\nTotal number of patients: {total_patients}")
+    print("Each patient appears:")
+    print(f"  - Once in test set")
+    print(f"  - Once in validation set")
+    print(f"  - {k-2} times in training set")
+
 def setup_k_fold_cross_validation(annotation_file_path, input_folder, base_config_path, output_dir='k_fold', k=5, epochs=10, patients_per_test=2, clip_len=75, feats=None):
     """
     Setup k-fold cross-validation 
@@ -518,25 +666,11 @@ def setup_k_fold_cross_validation(annotation_file_path, input_folder, base_confi
     Returns:
         Lists of annotation files and config files
     """
-    print(f"Preparing {k}-fold cross-validation setup under {output_dir}/...")
+    # Step 1: Setup initial directories
+    setup_initial_directories(output_dir)
     
-    # Create the base output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Step 1: Create fold annotation files
-    print("\nCreating fold annotation files...")
-    annotation_files, total_patients = create_fold_annotation_files(
-        annotation_file_path=annotation_file_path,
-        input_folder=input_folder,
-        output_dir=output_dir,
-        k=k,
-        minority_ratio=1.0,
-        patients_per_test=patients_per_test
-    )
-    
-    # Step 2: Create fold config files
-    print("\nCreating fold configuration files...")
-    config_files = create_fold_config_files(
+    # Step 2: Create configuration files (lightweight task)
+    config_files = create_configuration_files(
         base_config_path=base_config_path,
         output_dir=output_dir,
         k=k,
@@ -545,32 +679,22 @@ def setup_k_fold_cross_validation(annotation_file_path, input_folder, base_confi
         feats=feats
     )
     
-    # Print config files for easy reference
-    print("\nCreated the following files:")
-    print("Annotation files:")
-    for file in annotation_files:
-        print(f"  {file}")
+    # Step 3: Get user confirmation before heavy tasks
+    if not get_user_confirmation(k, patients_per_test, input_folder, annotation_file_path):
+        return [], config_files
     
-    print("\nConfiguration files:")
-    for file in config_files:
-        print(f"  {file}")
+    # Step 4: Create annotation files (heavy task)
+    annotation_files, total_patients = create_annotation_files(
+        annotation_file_path=annotation_file_path,
+        input_folder=input_folder,
+        output_dir=output_dir,
+        k=k,
+        patients_per_test=patients_per_test
+    )
     
-    print(f"\nSetup complete! All files are organized under the {output_dir}/ directory.")
-    print("You can now use run_kfold_training.py to train the models:")
-    
-    # Add summary section
-    print("\nK-FOLD SUMMARY")
-    print("==============")
-    print(f"Total number of folds: {k}")
-    print(f"Patients per set in each fold:")
-    print(f"  - Test set: {patients_per_test} patients")
-    print(f"  - Validation set: {patients_per_test} patients")
-    print(f"  - Training set: {total_patients - (2 * patients_per_test)} patients")
-    print(f"\nTotal number of patients: {total_patients}")
-    print("Each patient appears:")
-    print(f"  - Once in test set")
-    print(f"  - Once in validation set")
-    print(f"  - {k-2} times in training set")
+    # Step 5: Print results and summary
+    print_created_files(annotation_files, config_files)
+    print_setup_summary(output_dir, k, patients_per_test, total_patients)
     
     return annotation_files, config_files
 
@@ -581,7 +705,7 @@ if __name__ == "__main__":
     base_config_path = 'stgcn/stgcnpp_base.py'
     output_dir = 'k_fold'
     k = 5
-    epochs = 15
+    epochs = 20
     patients_per_test = 5
     clip_len = 90
     feats = ['jm']  # or whatever features you want to use
