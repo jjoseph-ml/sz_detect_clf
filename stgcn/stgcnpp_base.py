@@ -8,7 +8,7 @@ model = dict(
         gcn_with_res=True,
         tcn_type='mstcn',
         graph_cfg=dict(layout='coco_wholebody', mode='spatial')),
-    cls_head=dict(type='GCNHead', num_classes=2, in_channels=256))
+    cls_head=dict(type='GCNHead', num_classes=2, in_channels=256, dropout=0.5))
 
 dataset_type = 'PoseDataset'
 ann_file = 'k_fold/data/skeleton/bcm_master_annotation_fold1.pkl'
@@ -47,7 +47,7 @@ train_dataloader = dict(
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
         type='RepeatDataset',
-        times=2,
+        times=1,
         dataset=dict(
             type=dataset_type,
             ann_file=ann_file,
@@ -80,7 +80,7 @@ val_evaluator = [dict(type='AccMetric'), dict(type='LossMetric')]
 test_evaluator = val_evaluator
 
 train_cfg = dict(
-    type='EpochBasedTrainLoop', max_epochs=15, val_begin=1, val_interval=1)
+    type='EpochBasedTrainLoop', max_epochs=20, val_begin=1, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
@@ -88,7 +88,7 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         eta_min=0,
-        T_max=16,
+        T_max=20,
         by_epoch=True,
         convert_to_iter_based=True)
 ]
