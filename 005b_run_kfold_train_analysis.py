@@ -60,7 +60,7 @@ def validate_and_clean_metrics(train_metrics: Dict[str, List[float]], val_metric
                 val_clean[key] = val_clean[key][:min_len]
         else:
             print("  Error: No valid epochs found")
-            return {}, {}
+            return {'loss': [], 'accuracy': []}, {'loss': [], 'accuracy': []}
     
     # Check for invalid values (NaN, inf, negative)
     for metric_name, values in train_clean.items():
@@ -98,47 +98,9 @@ def validate_and_clean_metrics(train_metrics: Dict[str, List[float]], val_metric
         print(f"  Final clean dataset: {final_len} epochs")
     else:
         print("  Error: No valid epochs remaining after cleaning")
+        return {'loss': [], 'accuracy': []}, {'loss': [], 'accuracy': []}
     
     return train_clean, val_clean
-
-def extract_metrics_from_latest_complete_session(log_files: List[Path]) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
-    """Extract metrics from the most recent log file that contains complete training data."""
-    
-    # Sort log files by timestamp (latest first)
-    sorted_log_files = sorted(log_files, key=lambda x: x.name, reverse=True)
-    
-    print(f"Looking for complete training session among {len(sorted_log_files)} log files...")
-    
-    for i, log_file in enumerate(sorted_log_files):
-        print(f"Checking log file {i+1}/{len(sorted_log_files)}: {log_file.name}")
-        
-        # Count epochs in this file
-        epoch_count = 0
-        has_training_data = False
-        
-        try:
-            with open(log_file, 'r') as f:
-                for line in f:
-                    if 'Saving checkpoint at' in line:
-                        epoch_match = re.search(r'Saving checkpoint at (\d+) epochs?', line)
-                        if epoch_match:
-                            epoch_count = max(epoch_count, int(epoch_match.group(1)))
-                    elif 'Epoch(train)' in line:
-                        has_training_data = True
-        except Exception as e:
-            print(f"    Error reading {log_file}: {e}")
-            continue
-        
-        print(f"    Found {epoch_count} epochs, has training data: {has_training_data}")
-        
-        # If this file has training data and epochs, use it
-        if has_training_data and epoch_count > 0:
-            print(f"    Using {log_file.name} as the complete training session")
-            return extract_metrics_from_logs([log_file])
-    
-    # If no complete session found, fall back to original method
-    print("    No complete training session found, using all files with deduplication")
-    return extract_metrics_from_logs(log_files)
 
 def extract_metrics_from_logs(log_files: List[Path]) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
     """Extract training and validation metrics from multiple log files, handling resumed training."""
@@ -161,40 +123,20 @@ def extract_metrics_from_logs(log_files: List[Path]) -> Tuple[Dict[str, List[flo
             'accuracy': None
         }
         
-        # Track epochs found in this file to detect duplicates
-        epochs_in_this_file = set()
-        
         try:
             with open(log_file, 'r') as f:
                 for line in f:
                     # Check for end of epoch
                     if 'Saving checkpoint at' in line:
-                        # Extract epoch number from checkpoint line
-                        epoch_match = re.search(r'Saving checkpoint at (\d+) epochs?', line)
-                        if epoch_match:
-                            epoch_num = int(epoch_match.group(1))
-                            
-                            # Check if this epoch was already seen in a previous file
-                            if epoch_num in epochs_in_this_file:
-                                print(f"    Warning: Duplicate epoch {epoch_num} detected in same file")
-                                continue
-                            
-                            epochs_in_this_file.add(epoch_num)
-                            
-                            # Check if this epoch was already processed from a previous log file
-                            if len(train_metrics['loss']) >= epoch_num:
-                                print(f"    Skipping epoch {epoch_num} - already processed from previous log file")
-                                continue
-                            
-                            # Save the last metrics from this epoch
-                            if current_epoch_metrics['loss'] is not None:
-                                train_metrics['loss'].append(current_epoch_metrics['loss'])
-                                train_metrics['accuracy'].append(current_epoch_metrics['accuracy'])
-                                print(f"    Added training metrics for epoch {epoch_num} - Loss: {current_epoch_metrics['loss']:.4f}, "
-                                      f"Acc: {current_epoch_metrics['accuracy']:.4f}")
-                                # Reset current epoch metrics
-                                current_epoch_metrics['loss'] = None
-                                current_epoch_metrics['accuracy'] = None
+                        # Save the last metrics from this epoch
+                        if current_epoch_metrics['loss'] is not None:
+                            train_metrics['loss'].append(current_epoch_metrics['loss'])
+                            train_metrics['accuracy'].append(current_epoch_metrics['accuracy'])
+                            print(f"  Added training metrics - Loss: {current_epoch_metrics['loss']:.4f}, "
+                                  f"Acc: {current_epoch_metrics['accuracy']:.4f}")
+                            # Reset current epoch metrics
+                            current_epoch_metrics['loss'] = None
+                            current_epoch_metrics['accuracy'] = None
                         continue
                     
                     # Extract training metrics (keep updating until end of epoch)
@@ -208,18 +150,15 @@ def extract_metrics_from_logs(log_files: List[Path]) -> Tuple[Dict[str, List[flo
                     
                     # Extract validation metrics
                     elif 'Epoch(val)' in line and 'acc/top1:' in line:
-                        loss_match = re.search(r'loss/loss_cls: ([\d.]+)', line)
+                        loss_match = re.search(r'(?:loss/loss_cls|val/loss_cls): ([\d.]+)', line)
                         acc_match = re.search(r'acc/top1: ([\d.]+)', line)
                         
                         if loss_match and acc_match:
                             loss_val = float(loss_match.group(1))
                             acc_val = float(acc_match.group(1))
-                            
-                            # Only add validation metrics if we haven't exceeded the expected epoch count
-                            if len(val_metrics['loss']) < len(train_metrics['loss']) + 1:
-                                val_metrics['loss'].append(loss_val)
-                                val_metrics['accuracy'].append(acc_val)
-                                print(f"    Added validation metrics - Loss: {loss_val:.4f}, Acc: {acc_val:.4f}")
+                            val_metrics['loss'].append(loss_val)
+                            val_metrics['accuracy'].append(acc_val)
+                            print(f"  Added validation metrics - Loss: {loss_val:.4f}, Acc: {acc_val:.4f}")
         
         except Exception as e:
             print(f"Error reading log file {log_file}: {e}")
@@ -237,16 +176,16 @@ def extract_metrics_from_log(log_file: Path) -> Tuple[Dict[str, List[float]], Di
     """Extract training and validation metrics from a single log file (backward compatibility)."""
     return extract_metrics_from_logs([log_file])
 
-def plot_training_curves(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir: Path) -> None:
-    """Create training and validation curves for each fold."""
+def plot_training_curves(training_metrics: Dict, output_dir: Path, mode: str = 'kfold') -> None:
+    """Create training and validation curves for each training run."""
     plt.style.use('default')
     
     # Calculate grid dimensions
-    n_folds = len(fold_metrics)
+    n_runs = len(training_metrics)
     n_cols = 3  # Number of columns in the grid
-    n_rows = (n_folds + n_cols - 1) // n_cols  # Ceiling division
+    n_rows = (n_runs + n_cols - 1) // n_cols  # Ceiling division
     
-    # Create figure with subplots for each fold
+    # Create figure with subplots for each training run
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
     if n_rows == 1:
         axes = axes.reshape(1, -1)
@@ -255,8 +194,8 @@ def plot_training_curves(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir:
     train_color = '#1f77b4'
     val_color = '#ff7f0e'
     
-    # Plot each fold
-    for idx, (fold_idx, (train_metrics, val_metrics)) in enumerate(fold_metrics.items()):
+    # Plot each training run
+    for idx, (dir_idx, (train_metrics, val_metrics)) in enumerate(training_metrics.items()):
         row = idx // n_cols
         col = idx % n_cols
         ax = axes[row, col]
@@ -276,7 +215,10 @@ def plot_training_curves(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir:
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss', color=train_color)
         ax2.set_ylabel('Accuracy', color=val_color)
-        ax.set_title(f'Fold {fold_idx}', pad=10)
+        if mode == 'kfold':
+            ax.set_title(f'Fold {dir_idx}', pad=10)
+        else:
+            ax.set_title(f'Cross-Site Test {dir_idx}', pad=10)
         
         # Customize ticks
         ax.tick_params(axis='y', labelcolor=train_color)
@@ -291,21 +233,28 @@ def plot_training_curves(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir:
         ax.legend(lns, labs, loc='center right')
     
     # Remove empty subplots
-    for idx in range(n_folds, n_rows * n_cols):
+    for idx in range(n_runs, n_rows * n_cols):
         row = idx // n_cols
         col = idx % n_cols
         fig.delaxes(axes[row, col])
     
     # Add overall title
-    fig.suptitle('Training and Validation Metrics by Fold', fontsize=14, y=1.02)
+    if mode == 'kfold':
+        fig.suptitle('Training and Validation Metrics by Fold', fontsize=14, y=1.02)
+    else:
+        fig.suptitle('Training and Validation Metrics by Cross-Site Test', fontsize=14, y=1.02)
     
     # Adjust layout and save
     plt.tight_layout()
-    plt.savefig(output_dir / 'training_curves_by_fold.png', dpi=300, bbox_inches='tight')
+    if mode == 'kfold':
+        filename = 'training_curves_by_fold.png'
+    else:
+        filename = 'training_curves_by_cross_site.png'
+    plt.savefig(output_dir / filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-    # Also create separate files for each fold
-    for fold_idx, (train_metrics, val_metrics) in fold_metrics.items():
+    # Also create separate files for each training run
+    for dir_idx, (train_metrics, val_metrics) in training_metrics.items():
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
         epochs = range(1, len(train_metrics['loss']) + 1)
         
@@ -314,7 +263,6 @@ def plot_training_curves(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir:
         ax1.plot(epochs, val_metrics['loss'], '-', color=train_color, label='Validation')
         ax1.set_xlabel('Epoch')
         ax1.set_ylabel('Loss')
-        ax1.set_title(f'Fold {fold_idx} - Loss', pad=10)
         ax1.grid(True, linestyle='--', alpha=0.7)
         ax1.legend()
         
@@ -323,15 +271,23 @@ def plot_training_curves(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir:
         ax2.plot(epochs, val_metrics['accuracy'], '-', color=val_color, label='Validation')
         ax2.set_xlabel('Epoch')
         ax2.set_ylabel('Accuracy')
-        ax2.set_title(f'Fold {fold_idx} - Accuracy', pad=10)
         ax2.grid(True, linestyle='--', alpha=0.7)
         ax2.legend()
         
+        if mode == 'kfold':
+            ax1.set_title(f'Fold {dir_idx} - Loss', pad=10)
+            ax2.set_title(f'Fold {dir_idx} - Accuracy', pad=10)
+            filename = f'fold{dir_idx}_curves.png'
+        else:
+            ax1.set_title(f'Cross-Site Test {dir_idx} - Loss', pad=10)
+            ax2.set_title(f'Cross-Site Test {dir_idx} - Accuracy', pad=10)
+            filename = f'cross_site_test_{dir_idx}_curves.png'
+        
         plt.tight_layout()
-        plt.savefig(output_dir / f'fold{fold_idx}_curves.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_dir / filename, dpi=300, bbox_inches='tight')
         plt.close()
 
-def plot_boxplots(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir: Path) -> None:
+def plot_boxplots(training_metrics: Dict, output_dir: Path, mode: str = 'kfold') -> None:
     """Create boxplots of metrics across folds."""
     plt.style.use('default')  # Use default style
     
@@ -341,7 +297,7 @@ def plot_boxplots(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir: Path) 
     train_accs = []
     val_accs = []
     
-    for train_metrics, val_metrics in fold_metrics.values():
+    for train_metrics, val_metrics in training_metrics.values():
         train_losses.extend(train_metrics['loss'])
         val_losses.extend(val_metrics['loss'])
         train_accs.extend(train_metrics['accuracy'])
@@ -375,197 +331,72 @@ def plot_boxplots(fold_metrics: Dict[int, Tuple[Dict, Dict]], output_dir: Path) 
     plt.savefig(output_dir / 'metric_distributions.png', dpi=300)
     plt.close()
 
-def extract_metrics_from_resumed_training(log_files: List[Path]) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
-    """Extract metrics by reading log files in reverse chronological order, handling resumed training."""
-    
-    # Sort log files by timestamp (latest first)
-    sorted_log_files = sorted(log_files, key=lambda x: x.name, reverse=True)
-    
-    print(f"Processing {len(sorted_log_files)} log files in reverse chronological order...")
-    
-    train_metrics = {
-        'loss': [],
-        'accuracy': []
-    }
-    val_metrics = {
-        'loss': [],
-        'accuracy': []
-    }
-    
-    # Track which epochs we've already found to avoid duplicates
-    found_epochs = set()
-    
-    for i, log_file in enumerate(sorted_log_files):
-        print(f"Reading log file {i+1}/{len(sorted_log_files)}: {log_file.name}")
-        
-        # Check if this file contains resume information
-        has_resume_info = False
-        resumed_from_epoch = None
-        
-        # First pass: check for resume information
-        try:
-            with open(log_file, 'r') as f:
-                for line in f:
-                    if 'Auto resumed from the latest checkpoint' in line:
-                        has_resume_info = True
-                        print(f"    Found resume information in {log_file.name}")
-                        
-                        # Extract the checkpoint epoch if possible
-                        checkpoint_match = re.search(r'epoch_(\d+)\.pth', line)
-                        if checkpoint_match:
-                            resumed_from_epoch = int(checkpoint_match.group(1))
-                            print(f"    Resumed from epoch {resumed_from_epoch}")
-                        break
-        except Exception as e:
-            print(f"    Error checking resume info: {e}")
-            continue
-        
-        # Second pass: extract metrics from this file
-        current_epoch_metrics = {
-            'loss': None,
-            'accuracy': None
-        }
-        
-        epochs_in_this_file = []
-        
-        try:
-            with open(log_file, 'r') as f:
-                for line in f:
-                    # Check for end of epoch
-                    if 'Saving checkpoint at' in line:
-                        epoch_match = re.search(r'Saving checkpoint at (\d+) epochs?', line)
-                        if epoch_match:
-                            epoch_num = int(epoch_match.group(1))
-                            
-                            # Only process epochs we haven't seen before
-                            if epoch_num not in found_epochs:
-                                epochs_in_this_file.append(epoch_num)
-                                found_epochs.add(epoch_num)
-                                
-                                # Save the last metrics from this epoch
-                                if current_epoch_metrics['loss'] is not None:
-                                    train_metrics['loss'].append(current_epoch_metrics['loss'])
-                                    train_metrics['accuracy'].append(current_epoch_metrics['accuracy'])
-                                    print(f"    Added training metrics for epoch {epoch_num} - Loss: {current_epoch_metrics['loss']:.4f}, "
-                                          f"Acc: {current_epoch_metrics['accuracy']:.4f}")
-                                    # Reset current epoch metrics
-                                    current_epoch_metrics['loss'] = None
-                                    current_epoch_metrics['accuracy'] = None
-                            else:
-                                print(f"    Skipping epoch {epoch_num} - already processed")
-                        continue
-                    
-                    # Extract training metrics (keep updating until end of epoch)
-                    if 'Epoch(train)' in line:
-                        loss_match = re.search(r'loss: ([\d.]+)', line)
-                        acc_match = re.search(r'top1_acc: ([\d.]+)', line)
-                        
-                        if loss_match and acc_match:
-                            current_epoch_metrics['loss'] = float(loss_match.group(1))
-                            current_epoch_metrics['accuracy'] = float(acc_match.group(1))
-                    
-                    # Extract validation metrics
-                    elif 'Epoch(val)' in line and 'acc/top1:' in line:
-                        loss_match = re.search(r'loss/loss_cls: ([\d.]+)', line)
-                        acc_match = re.search(r'acc/top1: ([\d.]+)', line)
-                        
-                        if loss_match and acc_match:
-                            loss_val = float(loss_match.group(1))
-                            acc_val = float(acc_match.group(1))
-                            
-                            # Only add validation metrics if we haven't exceeded the expected epoch count
-                            if len(val_metrics['loss']) < len(train_metrics['loss']) + 1:
-                                val_metrics['loss'].append(loss_val)
-                                val_metrics['accuracy'].append(acc_val)
-                                print(f"    Added validation metrics - Loss: {loss_val:.4f}, Acc: {acc_val:.4f}")
-        
-        except Exception as e:
-            print(f"    Error reading metrics: {e}")
-            continue
-        
-        print(f"    Found {len(epochs_in_this_file)} new epochs: {sorted(epochs_in_this_file)}")
-        
-        # If we found epoch 1, we have the complete training history
-        if 1 in epochs_in_this_file:
-            print(f"    Found epoch 1 in {log_file.name} - training history complete")
-            break
-        
-        # If this file has resume info but no epoch 1, continue to previous file
-        if has_resume_info and not epochs_in_this_file:
-            print(f"    File has resume info but no new epochs - continuing to previous file")
-            continue
-    
-    # Sort the metrics by epoch number (they might be out of order due to reverse processing)
-    if train_metrics['loss']:
-        # Create a mapping of epoch numbers to metrics
-        epoch_metrics = {}
-        for i in range(len(train_metrics['loss'])):
-            epoch_num = i + 1  # Assuming epochs are sequential
-            epoch_metrics[epoch_num] = {
-                'train_loss': train_metrics['loss'][i],
-                'train_acc': train_metrics['accuracy'][i],
-                'val_loss': val_metrics['loss'][i] if i < len(val_metrics['loss']) else None,
-                'val_acc': val_metrics['accuracy'][i] if i < len(val_metrics['accuracy']) else None
-            }
-        
-        # Reconstruct sorted lists
-        sorted_epochs = sorted(epoch_metrics.keys())
-        train_metrics['loss'] = [epoch_metrics[ep]['train_loss'] for ep in sorted_epochs]
-        train_metrics['accuracy'] = [epoch_metrics[ep]['train_acc'] for ep in sorted_epochs]
-        val_metrics['loss'] = [epoch_metrics[ep]['val_loss'] for ep in sorted_epochs if epoch_metrics[ep]['val_loss'] is not None]
-        val_metrics['accuracy'] = [epoch_metrics[ep]['val_acc'] for ep in sorted_epochs if epoch_metrics[ep]['val_acc'] is not None]
-    
-    print(f"Found {len(train_metrics['loss'])} training epochs and {len(val_metrics['loss'])} validation epochs")
-    
-    # Validate and clean the metrics
-    train_metrics, val_metrics = validate_and_clean_metrics(train_metrics, val_metrics)
-    
-    return train_metrics, val_metrics
-
 def main():
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run k-fold or cross-site training analysis')
+    parser.add_argument('--mode', type=str, choices=['kfold', 'cross_site'], default='kfold',
+                        help='Analysis mode: kfold or cross_site (default: kfold)')
+    args = parser.parse_args()
+    
     # Paths
     work_dir = Path('k_fold/work_dirs')  # Relative path
     output_dir = Path('k_fold/training_analysis')
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Find all fold directories
-    fold_dirs = [d for d in work_dir.glob('fold*') if d.is_dir()]
-    # Sort by fold number (natural sorting) instead of alphabetical
-    fold_dirs.sort(key=lambda x: int(x.name.replace('fold', '')))
+    # Find training directories based on mode
+    if args.mode == 'kfold':
+        training_dirs = sorted([d for d in work_dir.glob('fold*') if d.is_dir()])
+        dir_pattern = "fold directories"
+    else:  # cross_site mode
+        training_dirs = sorted([d for d in work_dir.glob('cross_site_test_*') if d.is_dir()])
+        dir_pattern = "cross-site training directories"
     
-    if not fold_dirs:
-        print(f"Error: No fold directories found in {work_dir}")
+    if not training_dirs:
+        print(f"Error: No {dir_pattern} found in {work_dir}")
         return 1
     
-    print(f"Found {len(fold_dirs)} fold directories")
+    print(f"Found {len(training_dirs)} {dir_pattern}")
     
-    # Process each fold's logs
-    fold_metrics = {}
-    for fold_dir in fold_dirs:
-        fold_idx = int(fold_dir.name.replace('fold', ''))
+    # Process each directory's logs
+    training_metrics = {}
+    for training_dir in training_dirs:
+        if args.mode == 'kfold':
+            dir_idx = int(training_dir.name.replace('fold', ''))
+            dir_name = f"fold {dir_idx}"
+        else:  # cross_site mode
+            # Extract site name from directory name (e.g., "cross_site_test_ucla" -> "ucla")
+            if 'cross_site_test_' in training_dir.name:
+                site_name = training_dir.name.split('cross_site_test_')[1]
+                dir_idx = site_name
+                dir_name = f"cross-site test {site_name}"
+            else:
+                dir_idx = training_dir.name
+                dir_name = f"cross-site test {training_dir.name}"
         
         try:
-            log_files = find_log_files(fold_dir)
+            log_files = find_log_files(training_dir)
             
             # Detect if this is a resumed training scenario
             if len(log_files) > 1:
-                print(f"\nProcessing fold {fold_idx} - RESUMED TRAINING DETECTED")
+                print(f"\nProcessing {dir_name} - RESUMED TRAINING DETECTED")
                 print(f"  Found {len(log_files)} log files:")
                 for i, log_file in enumerate(log_files):
                     print(f"    {i+1}. {log_file.parent.name}/{log_file.name}")
             else:
-                print(f"\nProcessing fold {fold_idx} - SINGLE TRAINING SESSION")
+                print(f"\nProcessing {dir_name} - SINGLE TRAINING SESSION")
                 print(f"  Log file: {log_files[0].parent.name}/{log_files[0].name}")
             
-            train_metrics, val_metrics = extract_metrics_from_resumed_training(log_files)
+            train_metrics, val_metrics = extract_metrics_from_logs(log_files)
             
             if not train_metrics['loss'] or not val_metrics['loss']:
-                print(f"Warning: No metrics found in log files for fold {fold_idx}")
+                print(f"Warning: No metrics found in log files for {dir_name}")
                 continue
             
-            fold_metrics[fold_idx] = (train_metrics, val_metrics)
+            training_metrics[dir_idx] = (train_metrics, val_metrics)
             
-            # Print summary for this fold
+            # Print summary for this training run
             print(f"  Found {len(train_metrics['loss'])} epochs of training data")
             print(f"  Final training loss: {train_metrics['loss'][-1]:.4f}")
             print(f"  Final validation loss: {val_metrics['loss'][-1]:.4f}")
@@ -575,48 +406,57 @@ def main():
             print(f"Warning: {e}")
             continue
         except Exception as e:
-            print(f"Error processing fold {fold_idx}: {e}")
+            print(f"Error processing {dir_name}: {e}")
             continue
     
-    if not fold_metrics:
+    if not training_metrics:
         print("Error: No metrics could be calculated")
         return 1
     
     # Create visualizations
     print("\nGenerating visualizations...")
-    plot_training_curves(fold_metrics, output_dir)
-    plot_boxplots(fold_metrics, output_dir)
+    plot_training_curves(training_metrics, output_dir, args.mode)
+    plot_boxplots(training_metrics, output_dir, args.mode)
     print(f"Visualizations saved in: {output_dir}")
     
     # Save comprehensive metrics to CSV
     print("\nSaving metrics to CSV...")
     
     # Create a comprehensive DataFrame with all metrics
-    max_epochs = max(len(train_metrics['loss']) for train_metrics, _ in fold_metrics.values())
+    max_epochs = max(len(train_metrics['loss']) for train_metrics, _ in training_metrics.values())
     
     # Initialize DataFrame with proper column names
     columns = []
-    for fold_idx in sorted(fold_metrics.keys()):
+    for dir_idx in sorted(training_metrics.keys()):
+        if args.mode == 'kfold':
+            prefix = f'Fold{dir_idx}'
+        else:
+            prefix = f'CrossSite_{dir_idx}'
         columns.extend([
-            f'Fold{fold_idx}_Train_Loss',
-            f'Fold{fold_idx}_Train_Accuracy', 
-            f'Fold{fold_idx}_Val_Loss',
-            f'Fold{fold_idx}_Val_Accuracy'
+            f'{prefix}_Train_Loss',
+            f'{prefix}_Train_Accuracy', 
+            f'{prefix}_Val_Loss',
+            f'{prefix}_Val_Accuracy'
         ])
     
     metrics_df = pd.DataFrame(index=range(max_epochs), columns=columns)
     
     # Fill in the data
-    for fold_idx, (train_metrics, val_metrics) in fold_metrics.items():
+    for dir_idx, (train_metrics, val_metrics) in training_metrics.items():
         epochs = len(train_metrics['loss'])
         
+        if args.mode == 'kfold':
+            prefix = f'Fold{dir_idx}'
+        else:
+            prefix = f'CrossSite_{dir_idx}'
+        
         # Training metrics
-        metrics_df[f'Fold{fold_idx}_Train_Loss'].iloc[:epochs] = train_metrics['loss']
-        metrics_df[f'Fold{fold_idx}_Train_Accuracy'].iloc[:epochs] = train_metrics['accuracy']
+        metrics_df[f'{prefix}_Train_Loss'].iloc[:epochs] = train_metrics['loss']
+        metrics_df[f'{prefix}_Train_Accuracy'].iloc[:epochs] = train_metrics['accuracy']
         
         # Validation metrics
-        metrics_df[f'Fold{fold_idx}_Val_Loss'].iloc[:epochs] = val_metrics['loss']
-        metrics_df[f'Fold{fold_idx}_Val_Accuracy'].iloc[:epochs] = val_metrics['accuracy']
+        metrics_df[f'{prefix}_Val_Loss'].iloc[:epochs] = val_metrics['loss']
+        metrics_df[f'{prefix}_Val_Accuracy'].iloc[:epochs] = val_metrics['accuracy']
     
     # Add epoch numbers
     metrics_df.insert(0, 'Epoch', range(1, max_epochs + 1))
@@ -628,9 +468,9 @@ def main():
     
     # Also save a summary statistics file
     summary_data = []
-    for fold_idx, (train_metrics, val_metrics) in fold_metrics.items():
+    for dir_idx, (train_metrics, val_metrics) in training_metrics.items():
         summary_data.append({
-            'Fold': fold_idx,
+            'Fold': dir_idx,
             'Total_Epochs': len(train_metrics['loss']),
             'Final_Train_Loss': train_metrics['loss'][-1],
             'Final_Val_Loss': val_metrics['loss'][-1],
