@@ -7,6 +7,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import torch
 from pathlib import Path
 from typing import Dict, List, Tuple
 from sklearn.metrics import (
@@ -15,12 +16,16 @@ from sklearn.metrics import (
 )
 
 from .data_loader import filter_predictions_by_video, find_clip_data
-from .model_loader import load_best_fold_model, load_video_test_data
+from .model_loader import load_best_fold_model, load_video_test_data, load_model_from_checkpoint, load_video_test_data_with_checkpoint
 from .saliency import compute_saliency_map
 from .visualization import (
-    create_saliency_video, plot_saliency, create_whole_video_aggregated_saliency,
+    plot_saliency,
     calculate_and_save_body_part_saliency, create_body_part_saliency_histogram
 )
+from .viz_saliency_video_overlay import (
+    create_saliency_video, create_whole_video_aggregated_saliency
+)
+from .viz_saliency_timeline import plot_keypoint_saliency_over_time_whole_video
 
 
 def calculate_comprehensive_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_scores: np.ndarray) -> Dict[str, float]:
@@ -124,12 +129,12 @@ def process_video_by_task(best_fold: int, video_id: str, predictions_df, output_
     histograms_dir = video_output_dir / "histograms"
     clips_dir = histograms_dir / "clips"
     aggregated_dir = histograms_dir / "aggregated"
-    videos_clips_dir = video_output_dir / "videos" / "clips"
-    whole_video_dir = video_output_dir / "videos" / "whole_video"
+    videos_clips_dir = video_output_dir / "individual_clips"
+    whole_video_dir = video_output_dir  # Put whole video at same level as individual_clips
     data_dir = video_output_dir / "data"
     
     # Create all directories
-    for dir_path in [saliency_maps_dir, clips_dir, aggregated_dir, videos_clips_dir, whole_video_dir, data_dir]:
+    for dir_path in [saliency_maps_dir, clips_dir, aggregated_dir, videos_clips_dir, data_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
     
     # Load best fold model
@@ -288,7 +293,7 @@ def process_video_by_task(best_fold: int, video_id: str, predictions_df, output_
             f.write(f"\nOutput Directories:\n")
             f.write(f"- Saliency Maps: {saliency_maps_dir}\n")
             f.write(f"- Histograms: {histograms_dir}\n")
-            f.write(f"- Videos: {videos_clips_dir}\n")
+            f.write(f"- Individual Clips: {videos_clips_dir}\n")
             f.write(f"- Whole Video: {whole_video_dir}\n")
             f.write(f"- Data: {data_dir}\n")
     
@@ -303,10 +308,21 @@ def process_video_by_task(best_fold: int, video_id: str, predictions_df, output_
         
         if task in ['whole_video', 'saliency_videos', 'all']:
             print(f"\nCreating AGGREGATED saliency whole video visualization for fold {best_fold}, video {video_id}")
-            create_whole_video_aggregated_saliency(
-                best_fold, video_id, video_clips, whole_video_dir,
-                video_metrics=video_metrics
-            )
+            # Generate three videos with different normalization modes
+            normalization_modes = ["per_clip", "whole_video_per_keypoint", "per_clip_per_keypoint"]
+            for mode in normalization_modes:
+                try:
+                    print(f"\n   Generating whole video with {mode} normalization...")
+                    create_whole_video_aggregated_saliency(
+                        best_fold, video_id, video_clips, whole_video_dir,
+                        video_metrics=video_metrics, normalization_mode=mode
+                    )
+                    print(f"   ✅ Whole video ({mode} normalization) saved to: {whole_video_dir}")
+                except Exception as e:
+                    print(f"   ⚠️  Error generating whole video with {mode} normalization: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
     
     print(f"All outputs for video {video_id} saved to {video_output_dir}")
 
@@ -441,4 +457,376 @@ def create_per_patient_analysis(best_fold: int, predictions_df, output_dir: Path
         
         print(f"  Created per-patient analysis structure for patient {patient_id}")
     
-    print(f"Completed per-patient analysis setup for {len(patients)} patients") 
+    print(f"Completed per-patient analysis setup for {len(patients)} patients")
+
+
+def process_video_by_task_with_checkpoint(checkpoint_path: str, video_id: str, predictions_df, output_dir: Path, task='all', moving_avg_window=10):
+    """
+    Process a single video for saliency analysis using a specific checkpoint.
+    This is a checkpoint-based version of process_video_by_task.
+    
+    Args:
+        checkpoint_path: Path to the model checkpoint file
+        video_id: Video ID to process
+        predictions_df: DataFrame with predictions
+        output_dir: Output directory
+        task: Task to perform ('histograms', 'saliency_maps', 'saliency_videos', 'whole_video', 'keypoint_timeline', 'all')
+        moving_avg_window: Window size for moving average smoothing in body part timeline plots (default: 10 frames)
+    """
+    print(f"\n{'='*60}")
+    print(f"🎬 PROCESSING VIDEO: {video_id}")
+    print(f"📁 Checkpoint: {checkpoint_path}")
+    print(f"{'='*60}")
+    
+    print(f"\n📋 PHASE 1: SETUP & DATA PREPARATION")
+    print(f"   1. Loading prediction data from CSV file...")
+    
+    # Filter predictions for this video
+    video_predictions = filter_predictions_by_video(predictions_df, video_id)
+    
+    if len(video_predictions) == 0:
+        print(f"❌ No predictions found for video {video_id}")
+        return
+    
+    print(f"   2. Found {len(video_predictions)} clips with predictions")
+    print(f"   3. Creating prediction mapping (clip_name → ground_truth, predicted, confidence)...")
+    
+    # Create a mapping from clip_name to prediction data from CSV
+    clip_predictions = {}
+    for _, row in video_predictions.iterrows():
+        clip_predictions[row['clip_name']] = {
+            'true_label': row['ground_truth'],
+            'pred_label': row['predicted'],
+            'confidence': row['confidence']
+        }
+    
+    print(f"   4. Loading trained ST-GCN model from checkpoint...")
+    # Load model from checkpoint
+    model = load_model_from_checkpoint(checkpoint_path)
+    
+    print(f"   5. Loading keypoint test data for all video clips...")
+    # Load test data for this video using the checkpoint
+    test_data = load_video_test_data_with_checkpoint(video_id, checkpoint_path)
+    
+    if not test_data:
+        print(f"No test data found for video {video_id}")
+        return
+    
+    print(f"   6. Setting up output directory structure...")
+    # Create video-specific output directory
+    video_output_dir = output_dir / video_id
+    video_output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"   ✅ Phase 1 complete: {len(test_data)} clips ready for processing")
+    
+    # Initialize video_clips variable (will be populated in various task sections)
+    video_clips = None
+    
+    # Process based on task (keypoint plots can run independently at the end)
+    if task in ['histograms', 'all']:
+        print(f"\n📈 STEP 1/4: Creating body part saliency histograms")
+        print(f"   Computing saliency maps for {len(test_data)} clips...")
+        # Note: This function expects (fold, video_id, video_clips, output_dir)
+        # We need to create a video_clips dictionary from test_data
+        video_clips = {}
+        for model_instance, input_data, true_label, sample_idx, clip_name in test_data:
+            # Compute saliency map for this clip
+            saliency_map = compute_saliency_map(model_instance, input_data)
+            # Get prediction
+            with torch.no_grad():
+                pred_output = model_instance(input_data, return_loss=False)
+                
+                # Handle different output formats
+                if isinstance(pred_output, (list, tuple)):
+                    pred_output = pred_output[0]
+                
+                # Process the output to get class prediction
+                # Standard processing for all mode
+                output = pred_output.mean(dim=2)  # Average over temporal dimension
+                output = output.squeeze(1)  # Remove batch dimension
+                pred_scores = output.mean(dim=-1)  # Average over spatial dimension
+                
+                # Handle different class configurations
+                if pred_scores.size(1) != 2:
+                    # Convert to binary classification
+                    binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                    binary_scores[:, 0] = pred_scores[:, 0]
+                    binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                    pred_scores = binary_scores
+                
+                pred_label = torch.argmax(pred_scores, dim=1).item()
+            
+            # Use predictions from CSV instead of computing fresh
+            if clip_name in clip_predictions:
+                pred_data = clip_predictions[clip_name]
+                video_clips[clip_name] = {
+                    'true_label': pred_data['true_label'],
+                    'pred_label': pred_data['pred_label'],
+                    'saliency_map': saliency_map
+                }
+                # Debug output removed for cleaner logs
+            else:
+                print(f"    Warning: No prediction data found for clip {clip_name}")
+                # Fallback to computed prediction if CSV data not available
+                video_clips[clip_name] = {
+                    'true_label': true_label,
+                    'pred_label': pred_label,
+                    'saliency_map': saliency_map
+                }
+        
+        calculate_and_save_body_part_saliency(None, video_id, video_clips, video_output_dir)
+        print(f"   ✅ Body part saliency histograms saved to: {video_output_dir}")
+        # Note: create_body_part_saliency_histogram is for individual clips, not entire videos
+        # The aggregated analysis above already provides video-level body part saliency
+    
+    if task in ['saliency_maps', 'all']:
+        print(f"\n🖼️  STEP 2/4: Creating static saliency maps")
+        print(f"   Generating plots for {len(test_data)} clips...")
+        for model_instance, input_data, true_label, sample_idx, clip_name in test_data:
+            saliency_map = compute_saliency_map(model_instance, input_data)
+            # Use predictions from CSV for static plots
+            if clip_name in clip_predictions:
+                pred_data = clip_predictions[clip_name]
+                save_path = video_output_dir / f"{clip_name}_saliency_plot.png"
+                plot_saliency(input_data, saliency_map, pred_data['true_label'], pred_data['pred_label'], save_path, clip_name=clip_name, confidence=pred_data['confidence'])
+            else:
+                # Fallback to computed prediction
+                with torch.no_grad():
+                    pred_output = model_instance(input_data, return_loss=False)
+                    if isinstance(pred_output, (list, tuple)):
+                        pred_output = pred_output[0]
+                    output = pred_output.mean(dim=2)
+                    output = output.squeeze(1)
+                    pred_scores = output.mean(dim=-1)
+                    if pred_scores.size(1) != 2:
+                        binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                        binary_scores[:, 0] = pred_scores[:, 0]
+                        binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                        pred_scores = binary_scores
+                    pred_label = torch.argmax(pred_scores, dim=1).item()
+                    confidence = torch.softmax(pred_scores, dim=1).max().item()
+                save_path = video_output_dir / f"{clip_name}_saliency_plot.png"
+                plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, clip_name=clip_name, confidence=confidence)
+        print(f"   ✅ Static saliency maps saved to: {video_output_dir}")
+    
+    if task in ['saliency_videos', 'whole_video', 'all']:
+        print(f"\n🎥 STEP 3/4: Creating individual saliency videos")
+        print(f"   Processing {len(test_data)} clips...")
+        
+        # Create separate folder for individual video clips
+        clips_output_dir = video_output_dir / "individual_clips"
+        clips_output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"   📁 Individual clips will be saved to: {clips_output_dir}")
+        
+        for i, (model_instance, input_data, true_label, sample_idx, clip_name) in enumerate(test_data):
+            # Show progress every 50 clips
+            if i % 50 == 0:
+                print(f"   Progress: {i}/{len(test_data)} clips processed...")
+            # Compute saliency map for this clip
+            saliency_map = compute_saliency_map(model_instance, input_data)
+            # Get prediction
+            with torch.no_grad():
+                pred_output = model_instance(input_data, return_loss=False)
+                
+                # Handle different output formats
+                if isinstance(pred_output, (list, tuple)):
+                    pred_output = pred_output[0]
+                
+                # Process the output to get class prediction
+                output = pred_output.mean(dim=2)  # Average over temporal dimension
+                output = output.squeeze(1)  # Remove batch dimension
+                pred_scores = output.mean(dim=-1)  # Average over spatial dimension
+                
+                # Handle different class configurations
+                if pred_scores.size(1) != 2:
+                    # Convert to binary classification
+                    binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                    binary_scores[:, 0] = pred_scores[:, 0]
+                    binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                    pred_scores = binary_scores
+                
+                pred_label = torch.argmax(pred_scores, dim=1).item()
+            
+            # Use predictions from CSV for saliency video
+            if clip_name in clip_predictions:
+                pred_data = clip_predictions[clip_name]
+                create_saliency_video(clip_name, saliency_map, clips_output_dir, pred_label=pred_data['pred_label'])
+            else:
+                create_saliency_video(clip_name, saliency_map, clips_output_dir, pred_label=pred_label)
+        print(f"   ✅ Individual saliency videos saved to: {clips_output_dir}")
+        
+        if task in ['whole_video', 'all']:
+            print(f"\n🎬 STEP 4/4: Creating whole video aggregated saliency")
+            print(f"\n🧠 PHASE 2: SALIENCY COMPUTATION")
+            print(f"   7. Computing gradient-based saliency maps for each clip...")
+            print(f"      Processing {len(test_data)} clips to identify keypoint importance...")
+            
+            # Create video_clips dictionary for whole video processing using CSV predictions
+            if video_clips is None:
+                video_clips = {}
+            for i, (model_instance, input_data, true_label, sample_idx, clip_name) in enumerate(test_data):
+                if i % 50 == 0:  # Progress update every 50 clips
+                    print(f"      Progress: {i}/{len(test_data)} clips processed...")
+                saliency_map = compute_saliency_map(model_instance, input_data)
+                
+                # Use predictions from CSV instead of computing fresh
+                if clip_name in clip_predictions:
+                    pred_data = clip_predictions[clip_name]
+                    video_clips[clip_name] = {
+                        'true_label': pred_data['true_label'],
+                        'pred_label': pred_data['pred_label'],
+                        'saliency_map': saliency_map,
+                        'confidence': pred_data['confidence']
+                    }
+                    # Debug output removed for cleaner logs
+                else:
+                    print(f"    Warning: No prediction data found for clip {clip_name}")
+                    # Fallback to computed prediction if CSV data not available
+                    with torch.no_grad():
+                        pred_output = model_instance(input_data, return_loss=False)
+                        if isinstance(pred_output, (list, tuple)):
+                            pred_output = pred_output[0]
+                        output = pred_output.mean(dim=2)
+                        output = output.squeeze(1)
+                        pred_scores = output.mean(dim=-1)
+                        if pred_scores.size(1) != 2:
+                            binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                            binary_scores[:, 0] = pred_scores[:, 0]
+                            binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                            pred_scores = binary_scores
+                        pred_label = torch.argmax(pred_scores, dim=1).item()
+                        confidence = torch.softmax(pred_scores, dim=1).max().item()
+                    
+                    video_clips[clip_name] = {
+                        'true_label': true_label,
+                        'pred_label': pred_label,
+                        'saliency_map': saliency_map,
+                        'confidence': confidence
+                    }
+            
+            print(f"   ✅ Phase 2 complete: Saliency maps computed for all clips")
+            
+            print(f"\n📊 PHASE 3: WHOLE VIDEO AGGREGATION")
+            print(f"   8. Calculating video-level performance metrics...")
+            video_metrics = calculate_video_metrics(video_predictions)
+            if video_metrics:
+                print(f"      Video Performance: AUC={video_metrics['AUC_ROC']:.3f}, F1={video_metrics['F1_Score']:.3f}, Accuracy={video_metrics['Accuracy']:.3f}")
+            else:
+                print(f"      Warning: Could not calculate video metrics")
+                video_metrics = None
+            
+            # Generate three videos with different normalization modes
+            normalization_modes = ["per_clip", "whole_video_per_keypoint", "per_clip_per_keypoint"]
+            for mode in normalization_modes:
+                try:
+                    print(f"\n   Generating whole video with {mode} normalization...")
+                    create_whole_video_aggregated_saliency(
+                        None, video_id, video_clips, video_output_dir,
+                        video_metrics=video_metrics, normalization_mode=mode
+                    )
+                    print(f"   ✅ Whole video ({mode} normalization) saved to: {video_output_dir}")
+                except Exception as e:
+                    print(f"   ⚠️  Error generating whole video with {mode} normalization: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+    
+    # Generate keypoint saliency plots if requested
+    if task in ['keypoint_timeline', 'all']:
+        # Ensure video_clips is populated (create if not already created)
+        if video_clips is None or not video_clips:
+            print(f"\n📊 Generating keypoint saliency plots - computing saliency maps...")
+            video_clips = {}
+            for i, (model_instance, input_data, true_label, sample_idx, clip_name) in enumerate(test_data):
+                if i % 50 == 0:
+                    print(f"      Progress: {i}/{len(test_data)} clips processed...")
+                saliency_map = compute_saliency_map(model_instance, input_data)
+                
+                if clip_name in clip_predictions:
+                    pred_data = clip_predictions[clip_name]
+                    video_clips[clip_name] = {
+                        'true_label': pred_data['true_label'],
+                        'pred_label': pred_data['pred_label'],
+                        'saliency_map': saliency_map,
+                        'confidence': pred_data['confidence']
+                    }
+                else:
+                    # Fallback to computed prediction
+                    with torch.no_grad():
+                        pred_output = model_instance(input_data, return_loss=False)
+                        if isinstance(pred_output, (list, tuple)):
+                            pred_output = pred_output[0]
+                        output = pred_output.mean(dim=2)
+                        output = output.squeeze(1)
+                        pred_scores = output.mean(dim=-1)
+                        if pred_scores.size(1) != 2:
+                            binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                            binary_scores[:, 0] = pred_scores[:, 0]
+                            binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                            pred_scores = binary_scores
+                        pred_label = torch.argmax(pred_scores, dim=1).item()
+                        confidence = torch.softmax(pred_scores, dim=1).max().item()
+                    
+                    video_clips[clip_name] = {
+                        'true_label': true_label,
+                        'pred_label': pred_label,
+                        'saliency_map': saliency_map,
+                        'confidence': confidence
+                    }
+        
+        # Generate keypoint saliency plots
+        print(f"\n📈 Generating keypoint saliency over time plots...")
+        plot_keypoint_saliency_over_time_whole_video(video_id, video_clips, video_output_dir, moving_avg_window=moving_avg_window)
+        print(f"   ✅ Keypoint saliency plots saved to: {video_output_dir / 'keypoint_saliency_timeline'}")
+    
+    # Generate keypoint statistics analysis if requested
+    if task in ['keypoint_statistics', 'all']:
+        # Ensure video_clips is populated (create if not already created)
+        if video_clips is None or not video_clips:
+            print(f"\n📊 Generating keypoint statistics - computing saliency maps...")
+            video_clips = {}
+            for i, (model_instance, input_data, true_label, sample_idx, clip_name) in enumerate(test_data):
+                if i % 50 == 0:
+                    print(f"      Progress: {i}/{len(test_data)} clips processed...")
+                saliency_map = compute_saliency_map(model_instance, input_data)
+                
+                if clip_name in clip_predictions:
+                    pred_data = clip_predictions[clip_name]
+                    video_clips[clip_name] = {
+                        'true_label': pred_data['true_label'],
+                        'pred_label': pred_data['pred_label'],
+                        'saliency_map': saliency_map,
+                        'confidence': pred_data['confidence']
+                    }
+                else:
+                    # Fallback to computed prediction
+                    with torch.no_grad():
+                        pred_output = model_instance(input_data, return_loss=False)
+                        if isinstance(pred_output, (list, tuple)):
+                            pred_output = pred_output[0]
+                        output = pred_output.mean(dim=2)
+                        output = output.squeeze(1)
+                        pred_scores = output.mean(dim=-1)
+                        if pred_scores.size(1) != 2:
+                            binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
+                            binary_scores[:, 0] = pred_scores[:, 0]
+                            binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
+                            pred_scores = binary_scores
+                        pred_label = torch.argmax(pred_scores, dim=1).item()
+                        confidence = torch.softmax(pred_scores, dim=1).max().item()
+                    
+                    video_clips[clip_name] = {
+                        'true_label': true_label,
+                        'pred_label': pred_label,
+                        'saliency_map': saliency_map,
+                        'confidence': confidence
+                    }
+        
+        # Generate keypoint statistics
+        print(f"\n📊 Generating keypoint statistical analysis...")
+        from .viz_saliency_statistics import analyze_keypoint_statistics
+        analyze_keypoint_statistics(video_id, video_clips, video_output_dir)
+        print(f"   ✅ Keypoint statistics saved to: {video_output_dir / 'keypoint_statistics'}")
+    
+    print(f"\n🎉 COMPLETED: Video {video_id} processed successfully!")
+    print(f"📁 All outputs saved to: {video_output_dir}")
+    print(f"{'='*60}") 

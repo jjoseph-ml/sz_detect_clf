@@ -15,139 +15,18 @@ import json # For saving aggregated data
 
 from .utils import frame_extract, rdbu_color, load_visibility_data
 from .saliency import calculate_motion_data_without_outliers
-   
 
-def create_saliency_video(clip_name, saliency_map, output_dir, top_percent=10, pred_label=None, confidence=None):
-    try:
-        video_path = f"preprocessing/video_clips/{clip_name}.mp4"
-        keypoint_path = f"preprocessing/clip_keypoints/{clip_name}.pkl"
-        # Create output directory (output_dir is already the clips directory)
-        output_dir.mkdir(exist_ok=True, parents=True)
-        output_video = output_dir / f"{clip_name}_saliency.mp4"
-        
-        print(f"    Checking files for {clip_name}:")
-        print(f"      Video: {video_path} - {'✓' if os.path.exists(video_path) else '✗'}")
-        print(f"      Keypoints: {keypoint_path} - {'✓' if os.path.exists(keypoint_path) else '✗'}")
-        print(f"      Output: {output_video}")
-        
-        if not os.path.exists(video_path) or not os.path.exists(keypoint_path):
-            print(f"    Video or keypoint file not found for {clip_name}")
-            return None
-        
-        frames = frame_extract(video_path)
-        if not frames:
-            return None
-        
-        with open(keypoint_path, 'rb') as f:
-            keypoint_data = pickle.load(f)
-        
-        keypoints = None
-        keypoint_scores = None
-        if isinstance(keypoint_data, dict):
-            if 'keypoint' in keypoint_data:
-                keypoints = keypoint_data['keypoint']
-                if 'keypoint_score' in keypoint_data:
-                    keypoint_scores = keypoint_data['keypoint_score']
-            elif 'keypoints' in keypoint_data:
-                keypoints = keypoint_data['keypoints']
-        
-        if keypoints is None:
-            return None
-        
-        if len(keypoints.shape) == 4:
-            keypoints = keypoints[0]
-        
-        max_abs_val = np.max(np.abs(saliency_map))
-        saliency_norm = saliency_map / (max_abs_val + 1e-8)
-        
-        abs_saliency = np.abs(saliency_norm)
-        threshold = np.percentile(abs_saliency, 100 - top_percent)
-        
-        height, width = frames[0].shape[:2]
-        
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(output_video), fourcc, 30, (width, height))
-        
-        for i, frame in enumerate(frames):
-            if i >= len(saliency_norm) or i >= len(keypoints):
-                break
-                
-            vis_frame = frame.copy()
-            
-            legend_height = 30
-            legend_width = 200
-            legend_x = width - legend_width - 10
-            legend_y = 10
-            
-            for x in range(legend_width):
-                val = -1 + 2 * (x / legend_width)
-                color = rdbu_color(val)
-                cv2.line(vis_frame, (legend_x + x, legend_y), (legend_x + x, legend_y + legend_height), color, 1)
-            
-            cv2.putText(vis_frame, "Negative", (legend_x, legend_y + legend_height + 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, rdbu_color(-1), 1)
-            cv2.putText(vis_frame, "Positive", (legend_x + legend_width - 50, legend_y + legend_height + 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, rdbu_color(1), 1)
-            cv2.putText(vis_frame, "Neutral", (legend_x + legend_width//2 - 25, legend_y + legend_height + 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, rdbu_color(0), 1)
-            
-            frame_keypoints = keypoints[i]
-            frame_saliency = saliency_norm[i]
-            
-            for j, kpt in enumerate(frame_keypoints):
-                if j >= saliency_norm.shape[1]:
-                    continue
-                
-                saliency_val = frame_saliency[j]
-                
-                if abs(saliency_val) < threshold:
-                    continue
-                
-                x, y = int(kpt[0]), int(kpt[1])
-                
-                if 0 <= x < width and 0 <= y < height:
-                    valid_point = True
-                    if keypoint_scores is not None:
-                        valid_point = keypoint_scores[0, i, j] > 0.3
-                    
-                    if valid_point:
-                        color = rdbu_color(saliency_val)
-                        base_radius = 5
-                        scale_factor = 10
-                        radius = int(base_radius + abs(saliency_val) * scale_factor)
-                        cv2.circle(vis_frame, (x, y), radius, color, -1)
-            
-            if pred_label is not None and confidence is not None:
-                pred_text = f"Prediction: {'Seizure' if pred_label == 1 else 'Non-Seizure'}"
-                prob_text = f"Probability: {confidence:.2%}"
-                
-                cv2.rectangle(vis_frame, (10, 10), (310, 70), (0, 0, 0), -1)
-                cv2.rectangle(vis_frame, (10, 10), (310, 70), (255, 255, 255), 1)
-                
-                cv2.putText(vis_frame, pred_text, (20, 35), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(vis_frame, prob_text, (20, 60), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            out.write(vis_frame)
-        
-        out.release()
-        return output_video
-        
-    except Exception as e:
-        print(f"Error creating saliency video for {clip_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, model=None, clip_name=None, confidence=None):
-    # Use only 2 subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    # Create a comprehensive 2x3 subplot layout
+    fig = plt.figure(figsize=(24, 16))
     
     clip_display = clip_name if clip_name else "Unknown Clip"
     clip_type = "Seizure" if true_label == 1 else "Non-Seizure"
-    main_title = f"Clip: {clip_display}\nType: {clip_type}"
-    fig.suptitle(main_title, fontsize=12, y=1.02)
+    pred_type = "Seizure" if pred_label == 1 else "Non-Seizure"
+    conf_text = f" (Conf: {confidence:.3f})" if confidence else ""
+    main_title = f"Comprehensive Saliency Analysis: {clip_display}\nTrue: {clip_type} | Pred: {pred_type}{conf_text}"
+    fig.suptitle(main_title, fontsize=14, y=0.95)
     
     keypoint_groups = {
         'Body': list(range(0, 17)),
@@ -163,27 +42,6 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
         raise ValueError(f"Expected input shape (T, V, C), but got {input_vis.shape}")
     
     motion_data = calculate_motion_data_without_outliers(input_vis)
-
-    im1 = ax1.imshow(motion_data, aspect='auto', cmap='viridis')
-    
-    ax1.set_title('Motion Between Frames')
-    ax1.set_ylabel('Keypoints')
-    ax1.set_xlabel('Time (frames)')
-    plt.colorbar(im1, ax=ax1)
-    
-    ax1.set_xticks(np.arange(0, motion_data.shape[1], 10))
-    ax1.set_xticklabels([f"{i}" for i in range(0, motion_data.shape[1], 10)])
-    
-    group_positions = []
-    group_labels = []
-    for group_name, indices in keypoint_groups.items():
-        if indices:
-            mid_point = (indices[0] + indices[-1]) / 2
-            group_positions.append(mid_point)
-            group_labels.append(f"{group_name}\n({len(indices)} pts)")
-    
-    ax1.set_yticks(group_positions)
-    ax1.set_yticklabels(group_labels)
     
     if saliency_map.ndim > 2:
         saliency_map = saliency_map.squeeze()
@@ -191,262 +49,137 @@ def plot_saliency(input_data, saliency_map, true_label, pred_label, save_path, m
     max_abs_val = np.max(np.abs(saliency_map))
     saliency_norm = saliency_map / (max_abs_val + 1e-8)
     
-    # Simply transpose the normalized saliency map without masking
+    # Calculate motion magnitude per frame (sum across all keypoints for each frame)
+    motion_magnitude = np.sqrt(np.sum(motion_data**2, axis=0))  # Shape: (T,)
+    # Calculate saliency intensity per frame (mean across all keypoints for each frame)
+    saliency_intensity = np.mean(np.abs(saliency_norm), axis=0)  # Shape: (T,)
+    
+    # Ensure both arrays have the same length
+    min_length = min(len(motion_magnitude), len(saliency_intensity))
+    motion_magnitude = motion_magnitude[:min_length]
+    saliency_intensity = saliency_intensity[:min_length]
+    
+    # 1. Motion Heatmap (Top Left)
+    ax1 = plt.subplot(2, 3, 1)
+    im1 = ax1.imshow(motion_data, aspect='auto', cmap='viridis')
+    ax1.set_title('1. Motion Between Frames', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Keypoints')
+    ax1.set_xlabel('Time (frames)')
+    plt.colorbar(im1, ax=ax1, shrink=0.8)
+    
+    # 2. Saliency Heatmap (Top Middle)
+    ax2 = plt.subplot(2, 3, 2)
     saliency_viz = saliency_norm.T
-    
-    # Use the same colormap as before
     im2 = ax2.imshow(saliency_viz, aspect='auto', cmap='seismic', vmin=-1, vmax=1)
-    
-    ax2.set_title(f'Saliency Map\n' + 
-                  f'True: {"Seizure" if true_label == 1 else "Non-Seizure"}, ' + 
-                  f'Pred: {"Seizure" if pred_label == 1 else "Non-Seizure"}')
-    
+    ax2.set_title('2. Saliency Heatmap', fontsize=12, fontweight='bold')
     ax2.set_ylabel('Keypoints')
     ax2.set_xlabel('Time (frames)')
-    plt.colorbar(im2, ax=ax2)
+    plt.colorbar(im2, ax=ax2, shrink=0.8)
     
-    ax2.set_xticks(np.arange(0, saliency_viz.shape[1], 10))
-    ax2.set_xticklabels([f"{i}" for i in range(0, saliency_viz.shape[1], 10)])
+    # 3. Motion-Saliency Correlation (Top Right)
+    ax3 = plt.subplot(2, 3, 3)
     
-    ax2.set_yticks(group_positions)
-    ax2.set_yticklabels(group_labels)
-    
-    # Add contour lines to highlight boundaries
+    # Calculate correlation with error handling
     try:
-        saliency_for_contour = np.nan_to_num(saliency_viz, nan=0)
-        ax2.contour(saliency_for_contour, levels=[0], colors='black', linewidths=0.5, alpha=0.5)
+        if len(motion_magnitude) > 1 and len(saliency_intensity) > 1:
+            correlation = np.corrcoef(motion_magnitude, saliency_intensity)[0, 1]
+            if np.isnan(correlation):
+                correlation = 0.0
+        else:
+            correlation = 0.0
     except:
-        print("Could not add contour lines")
+        correlation = 0.0
     
-    if confidence is None and model is not None:
-        with torch.no_grad():
-            pred = model(input_data.cuda(), return_loss=False)
-            if isinstance(pred, (list, tuple)):
-                pred = pred[0]
-            pred = pred.mean(dim=2).squeeze(1)
-            pred_scores = pred.mean(dim=-1)
-            if pred_scores.size(1) > 2:
-                binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
-                binary_scores[:, 0] = pred_scores[:, 0]
-                binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
-                pred_scores = binary_scores
-            probs = torch.softmax(pred_scores, dim=1)[0]
-            confidence = float(probs[pred_label])
+    ax3.scatter(motion_magnitude, saliency_intensity, alpha=0.6, s=20)
+    ax3.set_title(f'3. Motion-Saliency Correlation\n(r = {correlation:.3f})', fontsize=12, fontweight='bold')
+    ax3.set_xlabel('Motion Magnitude')
+    ax3.set_ylabel('Saliency Intensity')
+    ax3.grid(True, alpha=0.3)
     
-    if confidence is not None:
-        plt.figtext(0.02, 0.02, f'Prediction confidence: {confidence:.2%}', 
-                    fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
+    # Add trend line with error handling
+    try:
+        if len(motion_magnitude) > 1 and len(saliency_intensity) > 1:
+            z = np.polyfit(motion_magnitude, saliency_intensity, 1)
+            p = np.poly1d(z)
+            ax3.plot(motion_magnitude, p(motion_magnitude), "r--", alpha=0.8, linewidth=2)
+    except:
+        pass  # Skip trend line if polyfit fails
+    
+    # 4. Temporal Saliency Traces (Bottom Left)
+    ax4 = plt.subplot(2, 3, 4)
+    colors = ['red', 'blue', 'green', 'orange', 'purple']
+    for i, (group_name, indices) in enumerate(keypoint_groups.items()):
+        if indices and len(indices) > 0:
+            group_saliency = np.mean(saliency_norm[:, indices], axis=1)
+            ax4.plot(group_saliency, label=group_name, color=colors[i % len(colors)], linewidth=2)
+    
+    ax4.set_title('4. Temporal Saliency Traces', fontsize=12, fontweight='bold')
+    ax4.set_xlabel('Time (frames)')
+    ax4.set_ylabel('Average Saliency')
+    ax4.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax4.grid(True, alpha=0.3)
+    ax4.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+    
+    # 5. Keypoint-Specific Saliency Bars (Bottom Middle)
+    ax5 = plt.subplot(2, 3, 5)
+    group_names = []
+    group_saliencies = []
+    for group_name, indices in keypoint_groups.items():
+        if indices and len(indices) > 0:
+            group_saliency = np.mean(np.abs(saliency_norm[:, indices]))
+            group_names.append(group_name)
+            group_saliencies.append(group_saliency)
+    
+    bars = ax5.bar(group_names, group_saliencies, color=['red', 'blue', 'green', 'orange', 'purple'][:len(group_names)])
+    ax5.set_title('5. Keypoint Group Saliency', fontsize=12, fontweight='bold')
+    ax5.set_ylabel('Average |Saliency|')
+    ax5.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, val in zip(bars, group_saliencies):
+        ax5.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                f'{val:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    # 6. Motion-Saliency Overlay (Bottom Right)
+    ax6 = plt.subplot(2, 3, 6)
+    
+    # Create overlay: motion as background, saliency as overlay
+    motion_bg = ax6.imshow(motion_data, aspect='auto', cmap='viridis', alpha=0.7)
+    
+    # Create saliency overlay with transparency
+    saliency_overlay = np.zeros_like(saliency_viz)
+    saliency_overlay[saliency_viz > 0] = saliency_viz[saliency_viz > 0]  # Only positive saliency
+    im6 = ax6.imshow(saliency_overlay, aspect='auto', cmap='Reds', alpha=0.6, vmin=0, vmax=1)
+    
+    ax6.set_title('6. Motion + Saliency Overlay', fontsize=12, fontweight='bold')
+    ax6.set_ylabel('Keypoints')
+    ax6.set_xlabel('Time (frames)')
+    
+    # Add colorbar for saliency overlay
+    cbar6 = plt.colorbar(im6, ax=ax6, shrink=0.8)
+    cbar6.set_label('Positive Saliency', rotation=270, labelpad=15)
+    
+    # Set common properties for all subplots
+    for ax in [ax1, ax2, ax4, ax6]:
+        ax.set_xticks(np.arange(0, motion_data.shape[1], max(1, motion_data.shape[1]//10)))
+        ax.set_xticklabels([f"{i}" for i in range(0, motion_data.shape[1], max(1, motion_data.shape[1]//10))])
+        
+        group_positions = []
+        group_labels = []
+        for group_name, indices in keypoint_groups.items():
+            if indices:
+                mid_point = (indices[0] + indices[-1]) / 2
+                group_positions.append(mid_point)
+                group_labels.append(f"{group_name}\n({len(indices)})")
+        
+        ax.set_yticks(group_positions)
+        ax.set_yticklabels(group_labels)
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.subplots_adjust(top=0.92)
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
-
-def create_whole_video_aggregated_saliency(fold, video_id, video_clips, output_dir,
-                                           low_percentile=5, high_percentile=95, # Using 5/95 defaults
-                                           video_metrics=None):
-    """
-    Create a whole-video visualization where saliency for each keypoint is the
-    SUM of its saliency values across all frames within its clip.
-    This aggregated value is then normalized globally across all clips
-    and displayed consistently for that keypoint throughout its clip's duration.
-    
-    Args:
-        fold (int): The fold number.
-        video_id (str): The video ID.
-        video_clips (dict): Dictionary of clip data {clip_name: {saliency_map, true_label, pred_label, confidence}}.
-        output_dir (Path): Base output directory (should be .../videos/{video_id}/videos)
-        low_percentile (int): Lower percentile for robust range calculation on AGGREGATED values.
-        high_percentile (int): Upper percentile for robust range calculation on AGGREGATED values.
-        video_metrics (dict, optional): Metrics to display on video overlay.
-    """
-    print(f"\n--- Starting Aggregated Saliency Visualization (Percentiles: {low_percentile}-{high_percentile}) ---")
-    # Load visibility data (optional, but good for consistency if used in text)
-    visibility_data = load_visibility_data()
-
-    # Create output directory structure (output_dir should already be the whole_video directory)
-    whole_video_dir = output_dir
-    whole_video_dir.mkdir(parents=True, exist_ok=True)
-
-    # Get all clip names and sort them by segment number
-    clip_names = list(video_clips.keys())
-    
-    # Create mapping of clip names to their temporal position
-    clip_timeline = {}
-    for clip in clip_names:
-        # Extract segment number from clip name (e.g., "05463487_79519000_Seg_1")
-        try:
-            seg_part = clip.split('_Seg_')[1]
-            if '_' in seg_part:
-                seg_num = int(seg_part.split('_')[0])
-            else:
-                seg_num = int(seg_part)
-            clip_timeline[clip] = seg_num
-        except (IndexError, ValueError):
-            print(f"Error parsing segment number for {clip}")
-            clip_timeline[clip] = 999999
-    
-        # Sort clips by their temporal position
-    sorted_clips = sorted(clip_names, key=lambda x: clip_timeline.get(x, 999999))
-    print(f"Sorted {len(sorted_clips)} clips for whole video visualization (Robust Percentile Norm)")
-    
-    # --- START Robust Global Range Calculation (PERCENTILE-BASED) ---
-    all_saliency_values = []
-    for clip_name in sorted_clips:
-        clip_data = video_clips[clip_name]
-        saliency_map = clip_data['saliency_map']
-        all_saliency_values.extend(saliency_map.flatten()) # Collect all values
-
-    if not all_saliency_values:
-        print("Warning: No saliency values found to calculate robust range. Using default [-1, 1].")
-        robust_max_abs_val = 1.0
-    else:
-        # Calculate percentiles
-        percentile_min = np.percentile(all_saliency_values, low_percentile)
-        percentile_max = np.percentile(all_saliency_values, high_percentile)
-
-        # Determine the effective maximum absolute value from percentiles for normalization
-        robust_max_abs_val = max(abs(percentile_min), abs(percentile_max))
-        if robust_max_abs_val < 1e-8: # Avoid division by zero
-            print(f"Warning: Robust max absolute saliency ({low_percentile}-{high_percentile} percentile) is near zero. Setting normalization factor to 1.0")
-            robust_max_abs_val = 1.0 # Default if range is tiny
-
-        print(f"Robust saliency range ({low_percentile}-{high_percentile} percentile): {percentile_min:.4f} to {percentile_max:.4f}")
-        print(f"Using robust_max_abs_val for normalization: {robust_max_abs_val:.4f}")
-    # --- END Robust Global Range Calculation ---
-    
-    # Create a whole video visualization (fixed: no deep nesting)
-    output_video = whole_video_dir / f"{video_id}_whole_video_saliency_robust_{low_percentile}_{high_percentile}.mp4" # Indicate robust norm method
-    
-    # Initialize video writer (will set dimensions after loading first frame)
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = None
-    
-    # Process each clip in temporal order
-    for clip_idx, clip_name in enumerate(sorted_clips):
-        # Get low visibility percentage if available
-        low_vis_percentage = visibility_data.get(clip_name, None)
-        
-        # Get saliency map and normalize using global min/max
-        saliency_map = video_clips[clip_name]['saliency_map']
-        
-        # Average saliency values across all frames in this clip
-        # This gives us one saliency value per keypoint for the entire clip
-        clip_averaged_saliency = np.mean(saliency_map, axis=0)  # Average across time dimension
-        
-        # Normalize using robust percentile-based normalization
-        saliency_norm_unclipped = clip_averaged_saliency / robust_max_abs_val
-        saliency_norm = np.clip(saliency_norm_unclipped, -1.0, 1.0) # Clip to [-1, 1] range
-        
-        # Get prediction info
-        true_label = video_clips[clip_name]['true_label']
-        pred_label = video_clips[clip_name]['pred_label']
-        confidence = video_clips[clip_name]['confidence']
-        
-        # Load video frames and keypoints for this clip
-        video_path = f"preprocessing/video_clips/{clip_name}.mp4"
-        keypoint_path = f"preprocessing/clip_keypoints/{clip_name}.pkl"
-        
-        if not os.path.exists(video_path) or not os.path.exists(keypoint_path):
-            print(f"Warning: Missing video or keypoint file for {clip_name}, skipping.")
-            continue
-        
-        frames = frame_extract(video_path)
-        try:
-            with open(keypoint_path, 'rb') as f:
-                keypoint_data = pickle.load(f)
-        except Exception as e:
-            print(f"Error loading keypoint file {keypoint_path}: {e}")
-            continue
-        
-        # Extract keypoints (handle different structures)
-        keypoints = None
-        if isinstance(keypoint_data, dict) and 'keypoint' in keypoint_data:
-            keypoints = keypoint_data['keypoint']
-        elif isinstance(keypoint_data, np.ndarray):
-             keypoints = keypoint_data
-        # Add more extraction logic if needed...
-        
-        if keypoints is None:
-            print(f"Could not extract keypoints from {keypoint_path}")
-            continue
-        keypoints = np.array(keypoints) # Ensure numpy array
-        
-        # Adjust keypoints shape to (T, V, C)
-        if keypoints.ndim == 5: # (N, M, T, V, C)
-            keypoints = keypoints[0, 0] # Take first instance, first person
-        elif keypoints.ndim == 4: # (M, T, V, C)
-            keypoints = keypoints[0] # Take first person
-        elif keypoints.ndim != 3:
-            print(f"Warning: Unexpected keypoint dimensions {keypoints.shape} for {clip_name}. Skipping.")
-            continue
-        
-        # Ensure number of frames match (only check frames vs keypoints, not saliency since it's averaged)
-        if len(frames) != keypoints.shape[0]:
-             print(f"Warning: Frame count mismatch for {clip_name} (Frames: {len(frames)}, Keypoints: {keypoints.shape[0]}). Skipping.")
-             continue
-        
-        # Visualize frames for this clip
-        for i in range(len(frames)):
-            vis_frame = frames[i].copy()
-            height, width, _ = vis_frame.shape
-            
-            # Initialize video writer with frame dimensions if not done yet
-            if video_writer is None:
-                video_writer = cv2.VideoWriter(str(output_video), fourcc, 30, (width, height)) # Adjust FPS if needed
-            
-            keypoints_frame = keypoints[i] # Keypoints for this frame (V, C)
-            
-            # Draw keypoints with saliency colors
-            for j in range(keypoints_frame.shape[0]): # Iterate over keypoints (V)
-                x, y = int(keypoints_frame[j, 0]), int(keypoints_frame[j, 1])
-                if x <= 0 or y <= 0 or x >= width or y >= height: # Skip if out of bounds
-                    continue
-                
-                # Get the averaged normalized saliency value for this keypoint (same for all frames in clip)
-                saliency_val = saliency_norm[j] # Use the clip-averaged saliency value
-                color = rdbu_color(saliency_val)
-                
-                # Calculate radius based on saliency magnitude (adjust scale factor as needed)
-                radius = int(1 + abs(saliency_val) * 5) # Example scaling
-                
-                cv2.circle(vis_frame, (x, y), radius, color, -1)
-            
-            # Add text overlays in specified positions
-            # Top left: Ground truth and prediction
-            pred_text = f'Pred: {"Seizure" if pred_label == 1 else "Non-Seizure"} ({confidence:.2f})'
-            true_text = f'True: {"Seizure" if true_label == 1 else "Non-Seizure"}'
-            cv2.putText(vis_frame, true_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(vis_frame, pred_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-            
-            # Top right: Legend
-            legend_text = "Red: Positive, Blue: Negative"
-            legend_x = width - 250
-            cv2.putText(vis_frame, legend_text, (legend_x, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            
-            # Bottom left: Clip name
-            clip_text = f'Clip: {clip_name}'
-            cv2.putText(vis_frame, clip_text, (10, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-            
-            # Bottom right: AUC and F1 score (if available in video_metrics)
-            if video_metrics is not None:
-                auc_text = f'AUC: {video_metrics.get("AUC_ROC", "N/A"):.3f}' if "AUC_ROC" in video_metrics else 'AUC: N/A'
-                f1_text = f'F1: {video_metrics.get("F1_Score", "N/A"):.3f}' if "F1_Score" in video_metrics else 'F1: N/A'
-                metrics_x = width - 150
-                cv2.putText(vis_frame, auc_text, (metrics_x, height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(vis_frame, f1_text, (metrics_x, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            
-            # Write frame
-            video_writer.write(vis_frame)
-        
-        print(f"Processed clip {clip_idx+1}/{len(sorted_clips)}: {clip_name}")
-    
-    # Release video writer
-    if video_writer is not None:
-        video_writer.release()
-        print(f"Whole video visualization (Robust Percentile Norm {low_percentile}-{high_percentile}) saved to {output_video}")
-    else:
-        print("No frames were processed for the whole video visualization.")
 
 # --- NEW FUNCTION: Average Saliency Map Calculation ---
 def calculate_and_save_average_saliency(fold, video_id, video_clips, output_dir):
@@ -687,8 +420,24 @@ def calculate_and_save_body_part_saliency(fold, video_id, video_clips, output_di
     # --- Save the aggregated data ---
     save_path_json = body_part_dir / f"avg_pos_neg_body_part_saliency_fold{fold}_{video_id}.json"
     try:
+        # Convert numpy types to Python native types for JSON serialization
+        def convert_numpy_types(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.float32, np.float64)):
+                return float(obj)
+            elif isinstance(obj, (np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+        
+        converted_data = convert_numpy_types(average_body_part_saliency)
         with open(save_path_json, 'w') as f:
-            json.dump(average_body_part_saliency, f, indent=4)
+            json.dump(converted_data, f, indent=4)
         print(f"Saved average Pos/Neg body part saliency data to: {save_path_json}")
     except Exception as e:
         print(f"Error saving body part saliency data to JSON: {e}")
@@ -1041,3 +790,5 @@ def create_body_part_saliency_histogram(clip_name, saliency_map, true_label, pre
     
     print(f"Saved body part saliency histogram to {output_path}")
     return output_path
+
+

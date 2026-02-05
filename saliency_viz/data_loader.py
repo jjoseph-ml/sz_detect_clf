@@ -8,7 +8,7 @@ import pandas as pd
 from pathlib import Path
 import pickle
 
-def load_predictions_from_csv(best_fold: int):
+def load_predictions_from_csv(best_fold: int = None):
     """Load predictions from the CSV file and return as DataFrame."""
     csv_path = f"all_video_testing/all/all_predictions.csv"
     

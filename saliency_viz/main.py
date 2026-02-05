@@ -6,7 +6,8 @@ Main orchestration module for saliency analysis.
 from pathlib import Path
 
 from .data_loader import load_predictions_from_csv
-from .video_processor import process_video_by_task, create_per_patient_analysis, create_analysis_directory_structure
+from .video_processor import process_video_by_task, create_per_patient_analysis, create_analysis_directory_structure, process_video_by_task_with_checkpoint
+from .model_loader import load_model_from_checkpoint
 
 
 def process_single_video(best_fold: int, video_id: str, task='all'):
@@ -113,3 +114,110 @@ def main(best_fold: int, task='all'):
     create_analysis_directory_structure(output_dir)
     
     print(f"\nCompleted saliency analysis for all videos in fold {best_fold}")
+
+
+def process_single_video_with_checkpoint(checkpoint_path: str, video_id: str, task='all', moving_avg_window=10):
+    """
+    Process a single video for saliency analysis using a specific checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the model checkpoint file
+        video_id: The specific video ID to process
+        task: The task to perform ('histograms', 'saliency_maps', 'saliency_videos', 'whole_video', 'keypoint_timeline', 'all')
+        moving_avg_window: Window size for moving average smoothing in body part timeline plots (default: 10 frames)
+    """
+    print(f"Starting saliency analysis for single video: {video_id} (checkpoint: {checkpoint_path}, task: {task})")
+    
+    # Create output directory
+    output_dir = Path('k_fold/saliency_maps')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load predictions from CSV (this doesn't depend on fold number)
+    try:
+        predictions_df = load_predictions_from_csv(None)  # Pass None since we're not using fold-specific CSV
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Please ensure the CSV file exists and run the testing script first.")
+        return
+    
+    # Check if the specified video exists in the predictions
+    if video_id not in predictions_df['video_id'].unique():
+        available_videos = predictions_df['video_id'].unique()
+        print(f"Error: Video ID '{video_id}' not found in predictions.")
+        print(f"Available video IDs: {sorted(available_videos)}")
+        return
+    
+    print(f"Found video {video_id} in predictions dataset")
+    
+    # Process the single video
+    try:
+        process_video_by_task_with_checkpoint(checkpoint_path, video_id, predictions_df, output_dir, task=task, moving_avg_window=moving_avg_window)
+        print(f"\nCompleted saliency analysis for video {video_id}")
+        
+        # Create analysis directory structure for future use
+        create_analysis_directory_structure(output_dir)
+        
+    except Exception as e:
+        print(f"Error processing video {video_id}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def main_with_checkpoint(checkpoint_path: str, task='all', moving_avg_window=10):
+    """
+    Main function to process all videos using a specific checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the model checkpoint file
+        task: The task to perform ('histograms', 'saliency_maps', 'saliency_videos', 'whole_video', 'keypoint_timeline', 'all')
+        moving_avg_window: Window size for moving average smoothing in body part timeline plots (default: 10 frames)
+    """
+    print(f"Starting saliency analysis using checkpoint {checkpoint_path} (task: {task})")
+    
+    # Create output directory
+    output_dir = Path('k_fold/saliency_maps')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load predictions from CSV
+    try:
+        predictions_df = load_predictions_from_csv(None)  # Pass None since we're not using fold-specific CSV
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Please ensure the CSV file exists and run the testing script first.")
+        return
+    
+    # Get unique video IDs from CSV
+    video_ids = predictions_df['video_id'].unique()
+    print(f"Found {len(video_ids)} unique video IDs: {video_ids}")
+    
+    # Convert numpy array to list for easier indexing
+    video_ids_list = video_ids.tolist()
+    
+    # Process each video
+    for i, video_id in enumerate(video_ids_list):
+        print("=" * 80)
+        print(f"Processing video: {video_id}  Number: {i + 1}")
+        print("=" * 80)
+        
+        try:
+            process_video_by_task_with_checkpoint(checkpoint_path, video_id, predictions_df, output_dir, task=task, moving_avg_window=moving_avg_window)
+        except Exception as e:
+            print(f"Error processing video {video_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Create per-patient analysis after processing all videos
+    if task in ['histograms', 'all']:
+        print("\n" + "=" * 80)
+        print("Creating per-patient analysis")
+        print("=" * 80)
+        create_per_patient_analysis(None, predictions_df, output_dir)  # Pass None for fold
+    
+    # Create analysis directory structure for cross-cutting analysis
+    print("\n" + "=" * 80)
+    print("Creating analysis directory structure")
+    print("=" * 80)
+    create_analysis_directory_structure(output_dir)
+    
+    print(f"\nCompleted saliency analysis for all videos using checkpoint {checkpoint_path}")

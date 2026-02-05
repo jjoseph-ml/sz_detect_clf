@@ -17,7 +17,7 @@ def compute_saliency_map(model, input_tensor):
     
     with torch.enable_grad():
         output = model(input_tensor, return_loss=False)
-        print(f"Output shape: {output.shape}")
+        # Output shape debug removed for cleaner logs
         
         # Handle different output formats
         if isinstance(output, (list, tuple)):
@@ -31,7 +31,7 @@ def compute_saliency_map(model, input_tensor):
         
         # Handle different class configurations
         if pred_scores.size(1) != 2:
-            print(f"Warning: Model output has {pred_scores.size(1)} classes, converting to binary")
+            # Converting to binary classification (suppressing repetitive warning)
             binary_scores = torch.zeros((pred_scores.size(0), 2), device=pred_scores.device)
             binary_scores[:, 0] = pred_scores[:, 0]
             binary_scores[:, 1] = pred_scores[:, 1:].sum(dim=1)
