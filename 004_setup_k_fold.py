@@ -298,7 +298,7 @@ def create_fold_annotation_files(annotation_file_path, input_folder, output_dir,
     Returns:
         List of annotation file paths and total number of patients
     """
-    np.random.seed(50)  # For reproducibility
+    np.random.seed(75)  # For reproducibility
     
     # Load and organize files by patient
     patient_data = organize_by_patient(annotation_file_path, input_folder)
@@ -705,10 +705,10 @@ if __name__ == "__main__":
     base_config_path = 'stgcn/stgcnpp_base.py'
     output_dir = 'k_fold'
     k = 5
-    epochs = 20
-    patients_per_test = 5
+    epochs = 150
+    patients_per_test = 8
     clip_len = 90
-    feats = ['jm']  # or whatever features you want to use
+    feats = ['jm','bm']  # or whatever features you want to use
     
     # Setup k-fold cross-validation
     annotation_files, config_files = setup_k_fold_cross_validation(
