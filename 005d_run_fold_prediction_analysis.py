@@ -79,7 +79,7 @@ def format_metrics_table(fold_metrics: Dict[int, Dict[str, float]]) -> pd.DataFr
     
     return df
 
-def plot_metrics_comparison(df: pd.DataFrame, output_dir: Path) -> None:
+def plot_metrics_comparison(df: pd.DataFrame, output_dir: Path, mode: str = 'kfold') -> None:
     """Create a bar plot comparing metrics across folds."""
     # Drop the Average row for plotting
     df_plot = df.drop('Average')
@@ -106,16 +106,18 @@ def plot_metrics_comparison(df: pd.DataFrame, output_dir: Path) -> None:
     plt.savefig(output_dir / 'metrics_comparison.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def plot_roc_curves(fold_predictions: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]], 
-                   output_dir: Path) -> None:
+def plot_roc_curves(run_predictions: Dict, output_dir: Path, mode: str = 'kfold') -> None:
     """Create ROC curves for all folds."""
     plt.figure(figsize=(8, 8))
     
-    # Plot ROC curve for each fold
-    for fold_idx, (y_true, _, y_scores) in fold_predictions.items():
+    # Plot ROC curve for each run
+    for run_idx, (y_true, _, y_scores) in run_predictions.items():
         fpr, tpr, _ = roc_curve(y_true, y_scores)
         roc_auc = auc(fpr, tpr)
-        plt.plot(fpr, tpr, label=f'Fold {fold_idx} (AUC = {roc_auc:.3f})')
+        if mode == 'kfold':
+            plt.plot(fpr, tpr, label=f'Fold {run_idx} (AUC = {roc_auc:.3f})')
+        else:
+            plt.plot(fpr, tpr, label=f'Cross-Site Test {run_idx} (AUC = {roc_auc:.3f})')
     
     # Plot random classifier line
     plt.plot([0, 1], [0, 1], 'k--', label='Random')
@@ -133,18 +135,20 @@ def plot_roc_curves(fold_predictions: Dict[int, Tuple[np.ndarray, np.ndarray, np
     plt.savefig(output_dir / 'roc_curves.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def plot_confusion_matrices(fold_predictions: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]], 
-                          output_dir: Path) -> None:
-    """Create heatmap of confusion matrices for all folds."""
-    n_folds = len(fold_predictions)
-    fig, axes = plt.subplots(1, n_folds, figsize=(5*n_folds, 4))
-    if n_folds == 1:
+def plot_confusion_matrices(run_predictions: Dict, output_dir: Path, mode: str = 'kfold') -> None:
+    """Create heatmap of confusion matrices for all runs."""
+    n_runs = len(run_predictions)
+    fig, axes = plt.subplots(1, n_runs, figsize=(5*n_runs, 4))
+    if n_runs == 1:
         axes = [axes]
     
-    for ax, (fold_idx, (y_true, y_pred, _)) in zip(axes, fold_predictions.items()):
+    for ax, (run_idx, (y_true, y_pred, _)) in zip(axes, run_predictions.items()):
         cm = confusion_matrix(y_true, y_pred)
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-        ax.set_title(f'Fold {fold_idx}')
+        if mode == 'kfold':
+            ax.set_title(f'Fold {run_idx}')
+        else:
+            ax.set_title(f'Cross-Site Test {run_idx}')
         ax.set_xlabel('Predicted')
         ax.set_ylabel('Actual')
     
@@ -153,6 +157,14 @@ def plot_confusion_matrices(fold_predictions: Dict[int, Tuple[np.ndarray, np.nda
     plt.close()
 
 def main():
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run k-fold or cross-site prediction analysis')
+    parser.add_argument('--mode', type=str, choices=['kfold', 'cross_site'], default='kfold',
+                        help='Analysis mode: kfold or cross_site (default: kfold)')
+    args = parser.parse_args()
+    
     # Directory containing prediction files
     predictions_dir = Path('k_fold/test_results')
     
@@ -160,65 +172,80 @@ def main():
         print(f"Error: Predictions directory not found: {predictions_dir}")
         return 1
     
-    # Find all prediction files with natural sorting
-    def natural_sort_key(filename):
-        """Extract fold number for natural sorting"""
-        if 'fold' in filename.name:
-            fold_part = filename.name.split('fold')[1].split('_')[0]
-            return int(fold_part)
-        return 0
-    
-    prediction_files = sorted(predictions_dir.glob('fold*_predictions.pkl'), key=natural_sort_key)
+    # Find prediction files based on mode
+    if args.mode == 'kfold':
+        def natural_sort_key(filename):
+            """Extract fold number for natural sorting"""
+            if 'fold' in filename.name:
+                fold_part = filename.name.split('fold')[1].split('_')[0]
+                return int(fold_part)
+            return 0
+        
+        prediction_files = sorted(predictions_dir.glob('fold*_predictions.pkl'), key=natural_sort_key)
+        file_pattern = "fold prediction files"
+    else:  # cross_site mode
+        prediction_files = list(predictions_dir.glob('cross_site_test_*_predictions.pkl'))
+        file_pattern = "cross-site prediction files"
     
     if not prediction_files:
-        print(f"Error: No prediction files found in {predictions_dir}")
+        print(f"Error: No {file_pattern} found in {predictions_dir}")
         return 1
     
-    print(f"Found {len(prediction_files)} prediction files")
+    print(f"Found {len(prediction_files)} {file_pattern}")
     
     # Store predictions for visualization
-    fold_predictions = {}
+    run_predictions = {}
     
-    # Calculate metrics for each fold
-    fold_metrics = {}
+    # Calculate metrics for each run
+    run_metrics = {}
     for pred_file in prediction_files:
-        fold_idx = int(pred_file.stem.split('fold')[1].split('_')[0])
-        print(f"\nProcessing fold {fold_idx}...")
+        if args.mode == 'kfold':
+            run_idx = int(pred_file.stem.split('fold')[1].split('_')[0])
+            run_name = f"fold {run_idx}"
+        else:  # cross_site mode
+            # Extract site name from filename (e.g., "cross_site_test_ucla_predictions.pkl" -> "ucla")
+            run_idx = pred_file.stem.split('cross_site_test_')[1].split('_')[0]
+            run_name = f"cross-site test {run_idx}"
+        
+        print(f"\nProcessing {run_name}...")
         
         try:
             # Load and process predictions
             y_true, y_pred, y_scores = load_predictions(pred_file)
             metrics = calculate_metrics(y_true, y_pred, y_scores)
-            fold_metrics[fold_idx] = metrics
-            fold_predictions[fold_idx] = (y_true, y_pred, y_scores)
+            run_metrics[run_idx] = metrics
+            run_predictions[run_idx] = (y_true, y_pred, y_scores)
             
-            # Print confusion matrix for this fold
+            # Print confusion matrix for this run
             tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
             print("\nConfusion Matrix:")
             print(f"TN: {tn:4d}  FP: {fp:4d}")
             print(f"FN: {fn:4d}  TP: {tp:4d}")
             
         except Exception as e:
-            print(f"Error processing fold {fold_idx}: {e}")
+            print(f"Error processing {run_name}: {e}")
             continue
     
-    if not fold_metrics:
+    if not run_metrics:
         print("Error: No metrics could be calculated")
         return 1
     
     # Create formatted table of results and print it
-    results_table = format_metrics_table(fold_metrics)
+    results_table = format_metrics_table(run_metrics)
     
     # Save results to CSV
-    output_file = predictions_dir / 'fold_metrics.csv'
+    if args.mode == 'kfold':
+        output_file = predictions_dir / 'fold_metrics.csv'
+    else:
+        output_file = predictions_dir / 'cross_site_metrics.csv'
     results_table.to_csv(output_file)
     print(f"\nResults saved to: {output_file}")
     
     # Create visualizations
     print("\nGenerating visualizations...")
-    plot_metrics_comparison(results_table, predictions_dir)
-    plot_roc_curves(fold_predictions, predictions_dir)
-    plot_confusion_matrices(fold_predictions, predictions_dir)
+    plot_metrics_comparison(results_table, predictions_dir, args.mode)
+    plot_roc_curves(run_predictions, predictions_dir, args.mode)
+    plot_confusion_matrices(run_predictions, predictions_dir, args.mode)
     print(f"Visualizations saved in: {predictions_dir}")
     
     return 0
