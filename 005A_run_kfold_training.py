@@ -81,9 +81,11 @@ def cleanup_checkpoints(work_dir_base: Path, folds_to_run: List[int]) -> None:
         print("\nNo checkpoint files found to clean up.")
 
 def main():
-    parser = argparse.ArgumentParser(description='Run k-fold cross-validation training')
+    parser = argparse.ArgumentParser(description='Run k-fold cross-validation or cross-site training')
     parser.add_argument('--folds', type=str, default='all', 
                       help='Comma-separated list of fold indices to run, or "all"')
+    parser.add_argument('--mode', type=str, choices=['kfold', 'cross_site'], default='kfold',
+                      help='Training mode: kfold or cross_site (default: kfold)')
     parser.add_argument('--dry-run', action='store_true', 
                       help='Print commands without executing them')
     parser.add_argument('--cleanup', action='store_true',
@@ -97,41 +99,70 @@ def main():
     config_dir = Path('k_fold/stgcn')
     work_dir_base = Path('k_fold/work_dirs')
     
-    # Find all fold config files with natural sorting
-    def natural_sort_key(filename):
-        """Extract fold number for natural sorting"""
-        if 'fold' in filename.name:
-            fold_part = filename.name.split('fold')[1].split('.')[0]
-            return int(fold_part)
-        return 0
-    
-    config_files = sorted([f for f in config_dir.glob("stgcnpp_fold*.py")], key=natural_sort_key)
-    config_files = [str(f) for f in config_files]
-    
-    if not config_files:
-        print(f"Error: No fold configuration files found in {config_dir}")
-        print("Please run setup_k_fold.py first to create the necessary files.")
-        return 1
-    
-    print(f"Found {len(config_files)} fold configuration files:")
-    for i, config_file in enumerate(config_files):
-        print(f"  Fold {i}: {config_file}")
-    
-    # Determine which folds to run
-    if args.folds == 'all':
-        folds_to_run = list(range(len(config_files)))
-    else:
-        try:
-            folds_to_run = [int(fold) for fold in args.folds.split(',')]
-            # Check for invalid fold indices
-            invalid_folds = [f for f in folds_to_run if f < 0 or f >= len(config_files)]
-            if invalid_folds:
-                print(f"Error: Invalid fold indices: {invalid_folds}")
-                print(f"Valid fold indices are 0-{len(config_files)-1}")
-                return 1
-        except ValueError:
-            print(f"Error: Invalid fold format. Use comma-separated integers (e.g., '0,1,2') or 'all'")
+    # Determine config file pattern based on mode
+    if args.mode == 'kfold':
+        config_pattern = "stgcnpp_fold*.py"
+        work_dir_pattern = "fold"
+        setup_script = "004_setup_k_fold.py"
+        
+        # Find all fold config files with natural sorting
+        def natural_sort_key(filename):
+            """Extract fold number for natural sorting"""
+            if 'fold' in filename.name:
+                fold_part = filename.name.split('fold')[1].split('.')[0]
+                return int(fold_part)
+            return 0
+        
+        config_files = sorted([f for f in config_dir.glob(config_pattern)], key=natural_sort_key)
+        config_files = [str(f) for f in config_files]
+        
+        if not config_files:
+            print(f"Error: No fold configuration files found in {config_dir}")
+            print(f"Please run {setup_script} first to create the necessary files.")
             return 1
+        
+        print(f"Found {len(config_files)} fold configuration files:")
+        for i, config_file in enumerate(config_files):
+            print(f"  Fold {i}: {config_file}")
+            
+    else:  # cross_site mode
+        config_pattern = "stgcnpp_cross_site_test_*.py"
+        work_dir_pattern = "cross_site_test"
+        setup_script = "004_setup_k_fold_cross_site.py"
+        
+        config_files = list(config_dir.glob(config_pattern))
+        config_files = [str(f) for f in config_files]
+        
+        if not config_files:
+            print(f"Error: No cross-site configuration files found in {config_dir}")
+            print(f"Please run {setup_script} first to create the necessary files.")
+            return 1
+        
+        print(f"Found {len(config_files)} cross-site configuration files:")
+        for config_file in config_files:
+            print(f"  - {config_file}")
+    
+    # Determine which folds/configs to run
+    if args.mode == 'kfold':
+        if args.folds == 'all':
+            folds_to_run = list(range(len(config_files)))
+        else:
+            try:
+                folds_to_run = [int(fold) for fold in args.folds.split(',')]
+                # Check for invalid fold indices
+                invalid_folds = [f for f in folds_to_run if f < 0 or f >= len(config_files)]
+                if invalid_folds:
+                    print(f"Error: Invalid fold indices: {invalid_folds}")
+                    print(f"Valid fold indices are 0-{len(config_files)-1}")
+                    return 1
+            except ValueError:
+                print(f"Error: Invalid fold format. Use comma-separated integers (e.g., '0,1,2') or 'all'")
+                return 1
+    else:  # cross_site mode
+        # For cross-site, we always run all configs (there's typically only one)
+        folds_to_run = list(range(len(config_files)))
+        if args.folds != 'all':
+            print("Warning: --folds argument ignored in cross-site mode. Running all cross-site configs.")
     
     print(f"\nWill run training for {len(folds_to_run)} folds: {', '.join(map(str, folds_to_run))}")
     
@@ -159,24 +190,38 @@ def main():
     
     for fold_idx in folds_to_run:
         config_file = config_files[fold_idx]
-        work_dir = work_dir_base / f"fold{fold_idx}"
+        
+        # Determine work directory name based on mode
+        if args.mode == 'kfold':
+            work_dir = work_dir_base / f"fold{fold_idx}"
+        else:  # cross_site mode
+            # Extract site name from config filename (e.g., "stgcnpp_cross_site_test_ucla.py" -> "ucla")
+            config_name = Path(config_file).stem
+            if 'cross_site_test_' in config_name:
+                site_name = config_name.split('cross_site_test_')[1]
+                work_dir = work_dir_base / f"cross_site_test_{site_name}"
+            else:
+                work_dir = work_dir_base / f"cross_site_test_{fold_idx}"
         
         # Ensure work directory exists
-        os.makedirs(work_dir, exist_ok=True)
+        os.makedirs(str(work_dir), exist_ok=True)
         
         print(f"\n{'='*80}")
-        print(f"Training fold {fold_idx}")
+        if args.mode == 'kfold':
+            print(f"Training fold {fold_idx}")
+        else:
+            print(f"Training cross-site config {fold_idx}")
         print(f"  Config: {config_file}")
         print(f"  Work directory: {work_dir}")
         print(f"{'='*80}")
         
         # Build command with work directory and any additional train.py arguments
+        # Note: Removed --resume flag to avoid checkpoint dimension mismatch when changing input features
         cmd = [
             'python',
             train_script,
             config_file,
-            '--work-dir', str(work_dir),
-            '--resume'
+            '--work-dir', str(work_dir)
         ] + train_args
         
         print(f"Running command: {' '.join(cmd)}")
